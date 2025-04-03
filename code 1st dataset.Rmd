@@ -1,0 +1,1062 @@
+---
+title: "GRA Weekly Report 1"
+author: "Jingyu Liang"
+date: "2024-10-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(readxl)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(writexl)
+library(pheatmap)
+library(reshape2)
+library(magrittr)
+```
+I did some data cleaning and divided the dataset into 4 sub-datasets according to major/trace elements and first/second visit. Then I drew the boxplot to see the change for concentration of elements from first visit to second visit. Also, I tested the normality of the data.
+
+# data cleaning process
+I divided the dataset into 4 subsets: 1st visit major elements, 2nd visit major elements, 1st visit trace elements, 2nd visit major elements. I changed all of the negative values into zero, and removed the number 79 firefighter who does not have any data. 
+```{r, message=FALSE,warning=FALSE, echo=FALSE}
+tox <- read_excel("neurotoxicant - wipe 1224_for_code.xlsx", sheet = "data_entry_adj")
+tox <- as.data.frame(tox)
+
+# column number: major element vs trace element
+majorcol <- which(tox[1,] == "µg/g")
+tracecol <- which(tox[1,] == "ng/g")
+
+# column number: first visit vs second visit
+firstcol <- grep("1", names(tox))
+secondcol <- grep("2", names(tox))
+
+# column number: major elements first visit and second visit
+majorcol1 <- intersect(majorcol, firstcol)
+majorcol2 <- intersect(majorcol, secondcol)
+
+# column number: trace elements first visit and second visit
+tracecol1 <- intersect(tracecol, firstcol)
+tracecol2 <- intersect(tracecol, secondcol)
+
+# change the values from char to number
+for (i in 2:49) (
+  tox[,i] <- as.numeric(tox[,i])
+)
+
+# change all negative value to 0
+tox[tox<0] <- 0
+
+# remove the first unit row 
+tox <- tox[-1,]
+
+# get the subdatasets
+major1st <- tox %>% select(1, majorcol1)
+major2nd <- tox %>% select(1, majorcol2)
+trace1st <- tox %>% select(1, tracecol1)
+trace2nd <- tox %>% select(1, tracecol2)
+
+```
+
+
+# Test the Normality of Data
+I draw the histogram for each of the elements to see the distribution and all of them are strongly right skewed. The plots are similar, there is one plot for example. It is the histogram of Ba concentration in the first visit. It is obviously right skewed.
+
+## Histogram of raw data
+```{r, echo=FALSE, results='hide', fig.show='hide'}
+# an example of Ba1
+Columname = "Ba1" #colnames(major1st)[3] # Ba1
+major1_hist<-hist(major1st[[Columname]], main = paste("Histogram of ",Columname),  xlab = paste(Columname, "Values"), col = "lightblue", border = "black", breaks = seq(0,65, by = 5))
+# major1_hist
+```
+
+all plots of raw data
+```{r, echo=FALSE}
+# histograms of major1st (major elements post-fire)
+par(mfrow = c(2,5))
+for (i in 2:dim(major1st)[2]) {
+  Columname = colnames(major1st)[i]
+  hist(major1st[[Columname]], main = paste("Histogram of ",Columname),  xlab = paste(Columname, "Values"), col = "lightblue", border = "black")
+}
+```
+
+```{r, echo=FALSE}
+# histograms for major pre-fire
+par(mfrow = c(2, 5))
+for (i in 2:dim(major2nd)[2]) {
+  Columname = colnames(major2nd)[i]
+  hist(major2nd[[Columname]], main = paste("Histogram of ",Columname),  xlab = paste(Columname, "Values"), col = "lightblue", border = "black")
+}
+```
+
+```{r, echo=FALSE}
+# histograms for trace post-fire
+par(mfrow=c(2,5))
+for (i in 2:dim(trace1st)[2]) {
+  Columname = colnames(trace1st)[i]
+  hist(trace1st[[Columname]], main = paste("Histogram of ",Columname), xlab = paste(Columname, "Values"), col = "lightpink", border = "black")
+}
+```
+
+```{r, echo=FALSE}
+# histograms for trace pre-fire
+par(mfrow=c(2,5))
+for (i in 2:dim(trace2nd)[2]) {
+  Columname = colnames(trace2nd)[i]
+  hist(trace2nd[[Columname]], main = paste("Histogram of ",Columname),  xlab = paste(Columname, "Values"), col = "lightpink", border = "black")
+}
+```
+
+## Q-Q Plot
+I plot the Q-Q plot of Ba concentration of first visit. The points do not fall on a straight line, and this also prove that our data is skewed, against normal distribution.
+```{r, echo=FALSE}
+# Visual inspection with QQ plots
+qq_plot <- function(x, title) {
+  qqnorm(x, main = "")
+  qqline(x, col = "blue")
+  title(main = title)
+}
+```
+
+
+```{r, echo=FALSE}
+
+# Create QQ plots for each variable
+par(mfrow = c(2, 5))  # Set up plotting area for plots: 2 rows 5 columns
+for (col in colnames(major1st)){
+  qq_plot(major1st[[col]], paste(col))
+}
+ 
+#qq_plot(df$var2, "QQ Plot of var2")
+#qq_plot(df$var3, "QQ Plot of var3")
+
+# Apply the Shapiro-Wilk normality test to each column
+# shapiro_results <- lapply(major1st, shapiro.test)
+
+# Display results
+# shapiro_results
+shapiro.test(major1st$Ba1)
+```
+
+# log scale
+Then I made a log scale for the subset of major elements first visit. Then the data looks better and similar to normal distribution. For example, here are the histogram and Q-Q plot of Ba for first visit. The Q-Q plot looks much better.
+base 10
+```{r, echo=FALSE}
+major1st_log <- bind_cols(major1st[1], lapply(major1st[,2:ncol(major1st)], function(x) log10(x+1)))
+major2nd_log <- bind_cols(major2nd[1], lapply(major2nd[,2:ncol(major2nd)], function(x) log10(x+1)))
+trace1st_log <- bind_cols(trace1st[1], lapply(trace1st[,2:ncol(trace1st)], function(x) log10(x+1)))
+trace2nd_log <- bind_cols(trace2nd[1], lapply(trace2nd[,2:ncol(trace2nd)], function(x) log10(x+1)))
+
+tox_log <- bind_cols(tox[1], lapply(tox[,2:ncol(tox)], function(x) log10(x+1)))
+```
+
+## histograms
+histograms for major post-fire
+```{r, echo=FALSE}
+# Loop through each column and create a histogram
+par(mfrow=c(2,5))
+for (Columname in colnames(major1st_log)[-1]) {
+  log_data<-major1st_log[[Columname]]
+  hist(log_data, main = paste(Columname), xlab = paste(Columname, "Values"), col = "lightblue", border = "black")
+  #qq_plot(log_data, paste("QQ Plot of ", Columname))
+  result <- shapiro.test(log_data)
+  print(paste("The p-value of Shapiro-Wilk Test of", Columname, "is: ", round(result$p.value, digits = 5)))
+}
+```
+
+histograms for major pre-fire
+```{r, echo=FALSE}
+# Loop through each column and create a histogram
+par(mfrow=c(2,5))
+for (Columname in colnames(major2nd_log)[-1]) {
+  log_data<-major2nd_log[[Columname]]
+  hist(log_data, main = paste(Columname), xlab = paste(Columname, "Values"), col = "lightblue", border = "black")
+  #qq_plot(log_data, paste("QQ Plot of ", Columname))
+  result <- shapiro.test(log_data)
+  print(paste("The p-value of Shapiro-Wilk Test of", Columname, "is: ", round(result$p.value, digits = 5)))
+}
+```
+
+histograms for trace post-fire
+```{r, echo=FALSE}
+# Loop through each column and create a histogram
+par(mfrow=c(2,5))
+for (Columname in colnames(trace1st_log)[-1]) {
+  log_data<-trace1st_log[[Columname]]
+  hist(log_data, main = paste(Columname), xlab = paste(Columname, "Values"), col = "lightpink", border = "black")
+  # qq_plot(log_data, paste("QQ Plot of ", Columname))
+  result <- shapiro.test(log_data)
+  print(paste("The p-value of", Columname, "is: ", round(result$p.value, digits = 5)))
+}
+```
+
+histograms for trace pre-fire
+```{r, echo=FALSE}
+# Loop through each column and create a histogram
+par(mfrow=c(2,5))
+for (Columname in colnames(trace2nd_log)[-1]) {
+  log_data<-trace2nd_log[[Columname]]
+  hist(log_data, main = paste(Columname), xlab = paste(Columname, "Values"), col = "lightpink", border = "black")
+  # qq_plot(log_data, paste("QQ Plot of ", Columname))
+  result <- shapiro.test(log_data)
+  print(paste("The p-value of", Columname, "is: ", result$p.value))
+}
+```
+
+# Correlation tables inside wipe dataset
+
+heatmap for all
+```{r}
+library(pheatmap)
+library(reshape2)
+# Exclude firefighter ID, check correlations for all elements
+all_correlations <- cor(tox_log[, -1], use = "complete.obs", method = "spearman")  
+print(all_correlations)
+
+corr <- all_correlations
+
+# for (i in 1:nrow(all_correlations)){
+#   for (j in 1:ncol(all_correlations)){
+#     ifelse(all_correlations[i,j] > 0.69, corr[i,j] <- 1,  corr[i,j] <- 0 ) 
+#   } 
+# }
+
+corr_df <- as.data.frame(corr)
+corr_df <- bind_cols(colnames(corr_df), corr_df)
+#write_xlsx(corr_df, "correlation.xlsx")
+
+# Melt the correlation matrix into long format
+cor_melt <- melt(corr) # or all_correlations
+
+# Plot the heatmap
+ggplot(data = cor_melt, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "purple", high = "orange", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 10, hjust = 1)) +
+  coord_fixed()
+
+pheatmap(all_correlations, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+```
+
+heatmap for major elements
+```{r}
+majorall_log <- bind_cols(major1st_log, major2nd_log[,-1])
+
+all_correlations <- cor(majorall_log[, -1], use = "complete.obs", method = "spearman") 
+major1st_corr <- cor(major1st_log[, -1], use = "complete.obs", method = "spearman") 
+major2nd_corr <- cor(major2nd_log[, -1], use = "complete.obs", method = "spearman") 
+
+corr <- all_correlations
+all_correlations <- as.data.frame(all_correlations)
+
+# Melt the correlation matrix into long format
+cor_melt <- melt(corr) 
+```
+
+```{r}
+# Plot the heatmap
+# ggplot(data = cor_melt, aes(Var1, Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = "purple", high = "orange", mid = "white", 
+#                        midpoint = 0, limit = c(-1,1), space = "Lab", 
+#                        name="Correlation") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 10, hjust = 1)) +
+#   coord_fixed()
+
+pheatmap(all_correlations, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(major1st_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(major2nd_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+```
+
+pre and post correlation
+```{r}
+prepost_correlations <- all_correlations %>% select(grep("1", names(all_correlations))) %>%
+  slice(grep("2", rownames(all_correlations)))
+
+pheatmap(prepost_correlations, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+
+# corr_prepost <- cor_melt[!(grepl("1", cor_melt[["Var1"]]) & grepl("1", cor_melt[["Var2"]]) |
+#                            grepl("2", cor_melt[["Var1"]]) & grepl("2", cor_melt[["Var2"]])), ]
+# 
+# ggplot(data = corr_prepost, aes(Var1, Var2, fill = value)) +
+#   geom_tile() +
+#   scale_fill_gradient2(low = "purple", high = "orange", mid = "white", 
+#                        midpoint = 0, limit = c(-1,1), space = "Lab", 
+#                        name="Correlation") +
+#   theme(axis.text.x = element_text(angle = 90, vjust = 1, size = 10, hjust = 1)) +
+#   coord_fixed()
+
+```
+
+heatmap for trace elements
+```{r}
+traceall_log <- bind_cols(trace1st_log, trace2nd_log[,-1])
+
+all_correlations <- cor(traceall_log[, -1], use = "complete.obs", method = "spearman") 
+trace1st_corr <- cor(trace1st_log[, -1], use = "complete.obs", method = "spearman")
+trace2nd_corr <- cor(trace2nd_log[, -1], use = "complete.obs", method = "spearman")
+
+corr <- all_correlations
+all_correlations <- as.data.frame(all_correlations)
+
+# pheatmap(all_correlations, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(trace1st_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(trace2nd_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+
+prepost_correlations <- all_correlations %>% select(grep("1", names(all_correlations))) %>%
+  slice(grep("2", rownames(all_correlations)))
+
+pheatmap(prepost_correlations, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+```
+
+heatmap for major vs trace
+```{r}
+all_correlations <- cor(tox_log[, -1], use = "complete.obs", method = "spearman")
+all_correlations <- as.data.frame(all_correlations)
+m1t1_corr <- all_correlations %>% select(1:10) %>% slice(11:24)
+m1t2_corr <- all_correlations %>% select(1:10) %>% slice(35:48)
+m2t1_corr <- all_correlations %>% select(25:34) %>% slice(11:24)
+m2t2_corr <- all_correlations %>% select(25:34) %>% slice(35:48)
+
+# pheatmap(all_correlations, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(m1t1_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(m1t2_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(m2t1_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+pheatmap(m2t2_corr, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+
+```
+
+
+
+# Organize the data for Box plot
+Then I made the boxplot for each of the subsets without the NA values. According to the original box plots, there are a lot of extreme values that are too large and we can barely see the other data clearly in the plot. Then I limited the max values of the box plot to show most of the data better.
+
+organize the data
+```{r,echo=FALSE}
+# major elements 1st visit
+# m1long <- major1st %>% pivot_longer(2:11, names_to = "chemicals", values_to = "ppb")
+# m1sort <- m1long %>% arrange(chemicals)
+# write_xlsx(m1sort, "m1sort.xlsx")
+m1long_log <- major1st_log %>% pivot_longer(2:11, names_to = "chemicals", values_to = "ppb")
+m1sort_log <- m1long_log %>% arrange(chemicals)
+# write_xlsx(m1sort_log, "m1sort_log.xlsx")
+
+# major elements 2nd visit
+# m2long <- major2nd %>% pivot_longer(2:11, names_to = "chemicals", values_to = "ppb")
+# m2sort <- m2long %>% arrange(chemicals)
+m2long_log <- major2nd_log %>% pivot_longer(2:11, names_to = "chemicals", values_to = "ppb")
+m2sort_log <- m2long_log %>% arrange(chemicals)
+
+# trace elements 1st visit
+# t1long <- trace1st %>% pivot_longer(2:15, names_to = "chemicals", values_to = "ppb")
+# t1sort <- t1long %>% arrange(chemicals)
+t1long_log <- trace1st_log %>% pivot_longer(2:15, names_to = "chemicals", values_to = "ppb")
+t1sort_log <- t1long_log %>% arrange(chemicals)
+
+# trace elements 2nd visit
+# t2long <- trace2nd %>% pivot_longer(2:15, names_to = "chemicals", values_to = "ppb")
+# t2sort <- t2long %>% arrange(chemicals)
+t2long_log <- trace2nd_log %>% pivot_longer(2:15, names_to = "chemicals", values_to = "ppb")
+t2sort_log <- t2long_log %>% arrange(chemicals)
+
+# m1m2 <- bind_rows(m1sort,m2sort)
+# m1m2 <- m1m2 %>% arrange(chemicals)
+m1m2_log <- bind_rows(m2sort_log,m1sort_log)
+m1m2_log <- m1m2_log %>% arrange(chemicals) # desc()
+# write_xlsx(m1m2_log, "m1m2_log.xlsx")
+
+# t1t2 <- bind_rows(t1sort, t2sort)
+# t1t2 <- t1t2 %>% arrange(chemicals)
+t1t2_log <- bind_rows(t1sort_log, t2sort_log)
+t1t2_log <- t1t2_log %>% arrange(chemicals) # desc(chemicals)
+# write_xlsx(t1t2_log, "t1t2_log.xlsx")
+
+```
+
+## the summary statistics
+```{r}
+# Function to calculate summary statistics for each column
+summary_table <- apply(tox_log[-1], 2, function(x) {
+  c(
+    Mean = mean(x, na.rm = TRUE),
+    Median = median(x, na.rm = TRUE),
+    Q1 = quantile(x, 0.25, na.rm = TRUE),
+    Q3 = quantile(x, 0.75, na.rm = TRUE),
+    Min = min(x, na.rm = TRUE),
+    Max = max(x, na.rm = TRUE)
+  )
+})
+
+# Convert to a data frame for better readability
+summary_table <- as.data.frame(t(summary_table))
+summary_table <- round(summary_table, 2)
+print(summary_table)
+# write_xlsx(summary_table, "summary stat 1.xlsx")
+
+```
+
+
+original box plots
+```{r, echo=FALSE, warning=FALSE}
+# par(mfrow=c(2,2))
+ggplot(m1m2_log, aes(x = chemicals, y = ppb)) +
+  geom_boxplot() + 
+  labs(x = "Chemicals", y = "µg/g", title = "major elements")+
+  theme_minimal()
+
+ggplot(t1t2_log, aes(x = chemicals, y = ppb)) +
+  geom_boxplot() +
+  labs(x = "Chemicals", y = "ng/g", title = "trace elements")
+
+```
+
+
+# Signed-Rank test & box plots
+## major elements
+### Wilcoxon Signed-Rank Test: Comparing two related groups (before and after)
+Null hypothesis (H₀): The distribution of differences between the paired samples is symmetric around zero (i.e., there is no significant difference between the two groups).
+Some of elements concentration have significant difference between post fire and pre fire, and also some of them does not. However, some data contain zero, so the Wilcoxon Signed-Rank Test is not effective. Then I used the sign test.
+
+For log scale:
+calculate the p-value
+```{r}
+# Initialize an empty data frame to store p-values
+p_value <- data.frame(name = character(), p_value = numeric())
+
+for (i in 2:dim(major1st_log)[2]){
+  # Get column names for post and pre-fire
+  element = colnames(major1st_log)[i]
+  element2 = colnames(major2nd_log)[i]
+  
+  # Extract post and pre-fire data
+  post <- major1st_log[[element]]
+  pre <- major2nd_log[[element2]]
+  
+  # Perform Wilcoxon Signed-Rank Test
+  # The paired = TRUE argument ensures it is a paired test
+  test_result <- wilcox.test(pre, post, paired = TRUE, exact = FALSE) 
+  
+  # Store the results
+  p_value[i-1,1] = element2
+  p_value[i-1,2] = test_result$p.value
+}
+
+# Mark the significance level
+p_values <- p_value %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>% 
+  mutate(name = gsub("2$", "", name))
+
+# View the results
+print(p_values)
+
+```
+
+### The Sign Test & Box Plots
+The Sign Test is a non-parametric test that is used to determine whether there is a significant difference between the medians of two related samples (paired data). It is simpler than the Wilcoxon Signed-Rank Test because it only considers the direction of differences (positive, negative, or no difference) without taking the magnitude into account. The Sign Test is particularly useful when the data contains many zeros or when differences are not normally distributed.
+Null Hypothesis (H₀): The median difference between the pairs is zero (i.e., there is no systematic difference between the paired observations).
+Alternative Hypothesis (H₁): The median difference is not zero.
+Test Statistic: The test statistic is the number of positive and negative signs. The Sign Test checks if one sign occurs significantly more often than the other using a binomial distribution.
+Binomial Test: The binom.test() function is used to test whether the number of positive signs is significantly different from the number of negative signs, assuming they occur equally often.
+If the p-value is less than your significance level (e.g., 0.05), you reject the null hypothesis and conclude that there is a significant difference between the paired samples.
+The default significance level is 0.05
+
+sign test of major elements
+```{r}
+p_value <- data.frame(name = character(), p_value = numeric())
+for (i in 2:dim(major1st_log)[2]){
+  # post and pre fire
+  element = colnames(major1st_log)[i]
+  element2 = colnames(major2nd_log)[i]
+  post <- major1st_log[[element]]
+  pre <- major2nd_log[[element2]]
+  
+  # Calculate differences
+  differences <- post - pre
+  
+  # Remove pairs with zero differences
+  non_zero_diff <- differences[!is.na(differences) & differences != 0]
+  
+  # Perform the sign test manually
+  positive_signs <- sum(non_zero_diff > 0, na.rm = TRUE)
+  negative_signs <- sum(non_zero_diff < 0, na.rm = TRUE)
+  
+  # Binomial test for the Sign Test
+  # p = 0.5: This sets the null hypothesis that positive and negative differences are equally likely.
+  test_result <- binom.test(positive_signs, positive_signs + negative_signs, p = 0.5)
+  p_value[i-1,1] = element2
+  p_value[i-1,2] = test_result$p.value
+  # ifelse(test_result$p.value < 0.05, print(paste("For", element, "and", element2,": reject H0, significant difference.")), print(paste("For", element, "and", element2,": fail to reject H0, no significant difference.")))
+}
+
+# mark the significant level
+p_values = p_value
+p_values <- p_values %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>% 
+  mutate(name = gsub("2$", "", name))
+
+p_values
+
+```
+
+### box plot of major elements
+clean the data 
+we get *significant_major* as the significant major elements
+```{r}
+data <- m1m2_log
+
+# convert 2 to 0 to represent pre
+data$chemicals <- gsub("2$", "0", data$chemicals)
+data <- data %>% arrange(chemicals)
+# generate another column just has element name
+data <- data %>%
+  mutate(name = gsub("[01]$", "", chemicals))
+
+# merge the p-value to dataset
+data <- data %>%
+  left_join(p_values, by = "name")
+
+# data <- data %>% arrange(desc(chemicals)) # desc(chemicals)
+# make chemicals on x-axis in plots arrange the same way as dataset
+# data$chemicals <- factor(data$chemicals, levels = unique(data$chemicals)) 
+
+# calculate the max for reorder
+data <- data %>%
+  group_by(name) %>%
+  mutate(max_value = max(ppb, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(desc(max_value))
+
+# delete the elements with no significance
+data <- na.omit(data) 
+
+# factor the name column for fixing the sequence of elements on the x-axis
+data <- data %>% mutate(name = factor(name, levels = unique(name)))
+
+# calculate the summation of each element post/pre-fire
+data %<>% group_by(chemicals) %>%
+  mutate(sum = sum(ppb, na.rm = TRUE))
+
+# mark pre-fire and post-fire
+data <- data %>% mutate(type = ifelse(grepl("0$",chemicals), "pre-fire", "post-fire"))
+
+# get the significant chemicals
+significant_major <- unique(data$name)
+```
+
+
+
+box plot
+for log scale
+```{r}
+ggplot(data, aes(x = name, y = ppb, fill = grepl("1", chemicals))) +
+  geom_boxplot(na.rm = TRUE) +
+  scale_fill_manual(
+    values = c("TRUE" = "lightblue", "FALSE" = "yellow"),
+    name = "Pre/Post-Fire",
+    labels = c("TRUE" = "Post", "FALSE" = "Pre")) +
+  geom_text(
+    data = data %>% filter(!is.na(ppb)),
+    aes(x = name, y = max(data$ppb, na.rm = TRUE) + 0.5, label = significance), 
+    color = "black", size = 5, vjust = 0) +
+  labs(x = "neurotoxicants", y = "Parts Per Billion", title = "Major Elements Concentration (wipe) with Significant Difference After Fire", caption = "signed-rank test") +
+  scale_y_continuous(breaks = c(0,1,2,3,4,5,6),labels = function(x) ifelse(x == 5, "100000", round(10^x, 2))) +
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        panel.spacing.x = unit(2, "lines"))
+
+```
+
+
+### stack plots
+organize the data
+```{r}
+sum_data_m <- data %>%
+  group_by(type, name, significance) %>%
+  summarise(total_ppb = sum(ppb, na.rm = TRUE), .groups = "drop") %>%
+  ungroup() %>%
+  group_by(type) %>%
+  mutate(sum = sum(total_ppb, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(desc(type)) %>%
+  mutate(type = ifelse(grepl("pre-fire",type), "pre-fire-m", "post-fire-m")) %>%
+  mutate(type = factor(type, levels = unique(type)))
+
+# sum_data_m$significance <- rep(sum_data_m$significance[1:(nrow(sum_data_m)/2)],2)
+
+# proportions <- sum_data_m %>% 
+#   group_by(type) %>%
+#   mutate(proportion = total_ppb/sum(total_ppb)) %>%
+#   ungroup() 
+# 
+# proportions %<>% mutate(location = rep(c(0.875, 0.70, 0.59, 0.4375, 0.3125, 0.1875, 0.0625),2),
+#                         percentage = paste(round(proportion,2)*100,"%", sep = ""))
+
+loc_half_sum1 <- c()
+for (i in 1:(nrow(sum_data_m)/2)) {
+  loc_half_sum1[i] = sum(sum_data_m$total_ppb[i:(nrow(sum_data_m)/2)])-sum_data_m$total_ppb[i]/2
+}
+
+loc_half_sum2 <- c()
+for (i in (nrow(sum_data_m)/2+1):nrow(sum_data_m)) {
+  loc_half_sum2[i-nrow(sum_data_m)/2] = sum(sum_data_m$total_ppb[i:nrow(sum_data_m)])-sum_data_m$total_ppb[i]/2
+}
+
+sum_data_m %<>% mutate(location = c(loc_half_sum1,loc_half_sum2))
+
+# sum_data_m %<>% mutate(location = c(1250,1000,790,600,400,250,70,
+#                                   1500,1200,990,750,510,260,70))
+```
+
+proportions
+```{r}
+ggplot(proportions, aes(x = type, y = proportion, fill = name)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  labs(
+    title = "Proportion of Neurotoxicants (major elements)",
+    caption = "signed-rank test",
+    y = "Proportion of ppb values",
+    fill = "Neurotoxicants") + 
+  geom_text(
+    data = proportions,
+    aes(x = type, y = location, label = paste(percentage, significance)), 
+    color = "black", size = 3, vjust = 0) +
+  theme_minimal()
+```
+
+stack bar plot 
+```{r}
+ggplot(sum_data_m, aes(x=type, y=total_ppb, fill=name)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3")  +
+  labs(
+    title = "Sum of Each Neurotoxicant Concentration (major elements)",
+    caption = "signed-rank test",
+    x = "Type",
+    y = "log(ppb)",
+    fill = "Neurotoxicants") + 
+  geom_text(
+    data = sum_data_m,
+    aes(x = type, y = location, label = paste(round(total_ppb,2), significance)), 
+    color = "black", size = 3, vjust = 0) + 
+  theme_minimal()
+  
+```
+
+
+
+## trace elements
+### sign test of trace elements
+```{r}
+p_value <- data.frame(name = character(), p_value = numeric())
+for (i in 2:dim(trace1st_log)[2]){
+  # post and pre fire
+  element = colnames(trace1st_log)[i]
+  element2 = colnames(trace2nd_log)[i]
+  post <- trace1st_log[[element]]
+  pre <- trace2nd_log[[element2]]
+  
+  # Calculate differences
+  differences <- post - pre
+  
+  # Remove pairs with zero differences
+  non_zero_diff <- differences[!is.na(differences) & differences != 0]
+  
+  # Perform the sign test manually
+  positive_signs <- sum(non_zero_diff > 0, na.rm = TRUE)
+  negative_signs <- sum(non_zero_diff < 0, na.rm = TRUE)
+  
+  # Binomial test for the Sign Test
+  # p = 0.5: This sets the null hypothesis that positive and negative differences are equally likely.
+  test_result <- binom.test(positive_signs, positive_signs + negative_signs, p = 0.5)
+  p_value[i-1,1] = element2
+  p_value[i-1,2] = test_result$p.value
+  # ifelse(test_result$p.value < 0.05, print(paste("For", element, "and", element2,": reject H0, significant difference.")), print(paste("For", element, "and", element2,": fail to reject H0, no significant difference.")))
+}
+
+# mark the significant level
+p_values = p_value
+p_values <- p_values %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>% 
+  mutate(name = gsub("2$", "", name))
+
+p_values
+```
+
+### Wilcoxon Signed-Rank Test: Comparing two related groups (before and after)
+Null hypothesis (H₀): The distribution of differences between the paired samples is symmetric around zero (i.e., there is no significant difference between the two groups).
+Some of elements concentration have significant difference between post fire and pre fire, and also some of them does not. However, some data contain zero, so the Wilcoxon Signed-Rank Test is not effective. Then I used the sign test.
+
+for log scale
+```{r}
+# Initialize an empty data frame to store p-values
+p_value <- data.frame(name = character(), p_value = numeric())
+
+for (i in 2:dim(trace1st_log)[2]){
+  # Get column names for post and pre-fire
+  element = colnames(trace1st_log)[i]
+  element2 = colnames(trace2nd_log)[i]
+  
+  # Extract post and pre-fire data
+  post <- trace1st_log[[element]]
+  pre <- trace2nd_log[[element2]]
+  
+  # Perform Wilcoxon Signed-Rank Test
+  # The paired = TRUE argument ensures it is a paired test
+  test_result <- wilcox.test(pre, post, paired = TRUE, exact = FALSE) 
+  
+  # Store the results
+  p_value[i-1,1] = element2
+  p_value[i-1,2] = test_result$p.value
+}
+
+# Mark the significance level
+p_values <- p_value %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  ) %>% 
+  mutate(name = gsub("2$", "", name))
+
+# View the results
+print(p_values)
+
+```
+
+### box plot of trace elements
+clean the data 
+*significant_trace* as significant trace elements
+```{r}
+data <- t1t2_log
+
+# convert 2 to 0 to represent pre and generate another column just has element name
+data$chemicals <- gsub("2$", "0", data$chemicals)
+data <- data %>% arrange(chemicals)
+data <- data %>%
+  mutate(name = gsub("[01]$", "", chemicals))
+
+# merge the p-value to dataset
+data <- data %>%
+  left_join(p_values, by = "name")
+
+# data <- data %>% arrange(desc(chemicals)) # desc(chemicals)
+# make chemicals on x-axis in plots arrange the same way as dataset
+# data$chemicals <- factor(data$chemicals, levels = unique(data$chemicals)) 
+
+# calculate the max for reorder
+data <- data %>%
+  group_by(name) %>%
+  mutate(max_value = max(ppb, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(desc(max_value))
+
+# delete the elements with no significance
+data <- na.omit(data) 
+
+data <- data %>% mutate(name = factor(name, levels = unique(name)))
+
+data %<>% group_by(chemicals) %>%
+  mutate(sum = sum(ppb, na.rm = TRUE))
+
+data <- data %>% mutate(type = ifelse(grepl("0$",chemicals), "pre-fire", "post-fire"))
+
+#get the significant trace elements
+significant_trace <- unique(data$name)
+
+# write_xlsx(data, "majorelementsboxplotdata.xlsx")
+```
+
+box plot
+for log scale
+```{r}
+# box plot
+ggplot(data, aes(x = name, y = ppb, fill = grepl("1", chemicals))) +
+  geom_boxplot(na.rm = TRUE) +
+  scale_fill_manual(
+    values = c("TRUE" = "lightblue", "FALSE" = "yellow"),
+    name = "Pre/Post-Fire",
+    labels = c("TRUE" = "Post", "FALSE" = "Pre")) +
+  geom_text(
+    data = data %>% filter(!is.na(ppb)),
+    aes(x = name, y = max(data$ppb, na.rm = TRUE) + 0.5, label = significance), 
+    color = "black", size = 5, vjust = 0) +
+  labs(x = "neurotoxicants", y = "Parts Per Billion", title = "Trace Elements Concentration (wipe) with Significant Difference After Fire", caption = "signed-rank test") +
+  scale_y_continuous(labels = function(x) round(10^x, 2))+
+  theme_minimal() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        panel.background = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        panel.spacing.x = unit(2, "lines"))
+
+
+
+ggplot(data, aes(x = name, y = ppb, fill = grepl("1", chemicals))) +
+  geom_boxplot(na.rm = TRUE) +
+  scale_fill_manual(
+    values = c("TRUE" = "lightblue", "FALSE" = "yellow"),
+    name = "Pre/Post-Fire",
+    labels = c("TRUE" = "Post", "FALSE" = "Pre")
+  ) +
+  geom_text(
+    data = data %>% filter(ppb > 0, !is.na(ppb)),
+    aes(x = name, y = 5.1, label = significance),
+    color = "black", size = 5, vjust = 0
+  ) +
+  labs(
+    x = "neurotoxicants",
+    y = "Parts Per Billion",
+    title = "Trace Elements Concentration (wipe) with Significant Difference After Fire",
+    caption = "signed-rank test"
+  ) +
+  scale_y_continuous(breaks = c(0,1,2,3,4,5,6),labels = function(x) ifelse(x == 5, "100000", round(10^x, 2)))+
+  theme_minimal() +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_blank(),
+    axis.line = element_line(colour = "black"),
+    panel.spacing.x = unit(2, "lines")
+  )
+
+```
+
+
+
+### stack plots
+organize the data
+```{r}
+# calculate the sum for each element post or pre fire and sum of all
+sum_data_t <- data %>%
+  group_by(type, name, significance) %>% 
+  summarise(total_ppb = sum(ppb, na.rm = TRUE), .groups = "drop") %>%
+  ungroup() %>%
+  group_by(type) %>% mutate(sum = sum(total_ppb, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(desc(type)) %>%
+  mutate(type = ifelse(grepl("pre-fire",type), "pre-fire-t", "post-fire-t")) %>%
+  mutate(type = factor(type, levels = unique(type)))
+
+# calculate the proportion
+# proportions <- sum_data_t %>% 
+#   group_by(type) %>%
+#   mutate(proportion = total_ppb/sum(total_ppb)) %>%
+#   ungroup() 
+
+# mark the location
+# loc_half <- c()
+# for (i in 1:(nrow(proportions)/2)) {
+#   loc_half[i] = sum(proportions$proportion[i:(nrow(proportions)/2)])-proportions$proportion[i]/2
+# }
+
+# proportions %<>% mutate(location = rep(loc_half,2),
+#                         percentage = paste(round(proportion,2)*100,"%", sep = ""))
+
+# calculate the location for the marks (geom_text)
+loc_half_sum1 <- c()
+for (i in 1:(nrow(sum_data_t)/2)) {
+  loc_half_sum1[i] = sum(sum_data_t$total_ppb[i:(nrow(sum_data_t)/2)])-sum_data_t$total_ppb[i]/2
+}
+
+loc_half_sum2 <- c()
+for (i in (nrow(sum_data_t)/2+1):nrow(sum_data_t)) {
+  loc_half_sum2[i-nrow(sum_data_t)/2] = sum(sum_data_t$total_ppb[i:nrow(sum_data_t)])-sum_data_t$total_ppb[i]/2
+}
+
+sum_data_t %<>% mutate(location = c(loc_half_sum1,loc_half_sum2))
+```
+
+proportions
+```{r}
+ggplot(proportions, aes(x = type, y = proportion, fill = name)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3") +
+  labs(
+    title = "Proportion of Neurotoxicants (trace elements)",
+    caption = "signed-rank test",
+    y = "Proportion of ppb values",
+    fill = "Neurotoxicants") +
+  theme_minimal() + 
+  geom_text(
+    data = proportions,
+    aes(x = type, y = location, label = paste(percentage, significance)), 
+    color = "black", size = 3, vjust = 0) 
+```
+
+stack bar plot 
+```{r}
+ggplot(sum_data_t, aes(x=type, y=total_ppb, fill=name)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3")  +
+  labs(
+    title = "Sum of Each Neurotoxicant Concentration (trace elements)",
+    caption = "signed-rank test",
+    x = "Type",
+    y = "log(ppb)",
+    fill = "Neurotoxicants") +
+  theme_minimal() + 
+  geom_text(
+    data = sum_data_t,
+    aes(x = type, y = location, label = paste(round(total_ppb,2), significance)), 
+    color = "black", size = 2.5, vjust = 0)
+  
+```
+
+# stack plot for all
+## signed-rank test for summation of major and trace
+```{r}
+# calculate the summation of all neurotoxicants for each ff based on pre/post
+pre_t_sum <- rowSums(trace2nd_log[,-1], na.rm = TRUE)
+post_t_sum <- rowSums(trace1st_log[,-1], na.rm = TRUE)
+pre_m_sum <- rowSums(major2nd_log[,-1], na.rm = TRUE)
+post_m_sum <- rowSums(major1st_log[,-1], na.rm = TRUE)
+sum_majortrace <- data.frame(pre_m_sum, post_m_sum, pre_t_sum, post_t_sum)
+
+# Initialize an empty data frame to store p-values
+p_values <- data.frame(element = character(), p_value = numeric())
+
+# Perform Wilcoxon Signed-Rank Test
+# The paired = TRUE argument ensures it is a paired test
+test_result_t <- wilcox.test(pre_t_sum, post_t_sum, paired = TRUE, exact = FALSE) 
+test_result_m <- wilcox.test(pre_m_sum, post_m_sum, paired = TRUE, exact = FALSE) 
+  
+# Store the results
+p_values[1,1] = "sum of trace elements"
+p_values[1,2] = test_result_t$p.value
+p_values[2,1] = "sum of major elements"
+p_values[2,2] = test_result_m$p.value
+
+# Mark the significance level
+p_values <- p_values %>%
+  mutate(
+    significance = case_when(
+      p_value < 0.001 ~ "***",
+      p_value < 0.01 ~ "**",
+      p_value < 0.05 ~ "*",
+      TRUE ~ NA
+    )
+  )
+
+# View the results
+print(p_values)
+
+# merge the p-values and significance into the sum_data
+
+```
+
+## organize the dataset
+```{r}
+sum_data <- bind_rows(sum_data_m, sum_data_t)
+sum_data %<>% mutate(type = factor(type, levels = unique(type))) %>%
+  select(-significance) %>%
+  mutate(element = ifelse(
+    grepl("-m$",type), "sum of major elements", "sum of trace elements"))%>%
+  left_join(p_values, by = "element")
+
+```
+
+## stack plot
+```{r}
+stack <- ggplot(sum_data, aes(x=type, y=total_ppb, fill=name)) +
+  geom_bar(stat = "identity")  +
+  labs(
+    title = "Sum of Each Neurotoxicant Concentration with Significance Marks",
+    caption = "signed-rank test",
+    x = "Type",
+    y = "log(ppb)",
+    fill = "Neurotoxicants") +
+  theme_minimal() + 
+  theme(legend.position = "none",
+        panel.background = element_rect(fill = "white", color = NA),
+        plot.background = element_rect(fill = "white", color = NA)) +
+  geom_text(
+    data = sum_data,
+    aes(x = type, y = location, label = paste(name, round(total_ppb,2))), 
+    color = "black", size = 2.5, vjust = 0) +
+  geom_text(
+    data = sum_data[8:14,],
+    aes(x = type, y = max(sum_data$sum)+50, label = significance),
+    color = "black", size = 3, vjust = 0) +
+  geom_text(
+    data = sum_data[24:32,],
+    aes(x = type, y = max(sum_data[24:32,]$sum)+50, label = significance),
+    color = "black", size = 3, vjust = 0)
+
+# Save as PNG
+stack
+# ggsave("stack plot.png", plot = stack, width = 8, height = 12, dpi = 300)
+```
+
+
+# descriptive Statistics for wipe data
+According to the plots, in general, the concentration is going down.
+Regarding the elements, S, As, V, and Zr have high concentration. 
+In order to see the trend, I'll make line charts, scatter plots and do linear regression later. 
+Here are the R studio output of the descriptive statistics of concentration of chemicals. The output is rough so far. I will make charts and plots to show them later, if necessary.
+```{r, echo=FALSE}
+for (i in 2:11) {
+  print(names(major1st)[i])
+  print(summary(major1st[,i]))
+}
+for (i in 2:11) {
+  print(names(major2nd)[i])
+  print(summary(major2nd[,i]))
+}
+for (i in 2:15) {
+  print(names(trace1st)[i])
+  print(summary(trace1st[,i]))
+}
+for (i in 2:15) {
+  print(names(trace2nd)[i])
+  print(summary(trace2nd[,i]))
+}
+```
+
+
+
+# Count Missing values
+I found 78 missing values in total. There are some methods to fill the missing values. First method is filling them in each column with the median or mean of the column. The second method is using predictive models to predict the missing values, such as regression models. I will try these two methods later, and visualize the data according to different methods applied. 
+```{r, echo=FALSE}
+# How many missing points
+missnum <- sum(is.na(tox))
+colmiss <- colSums(is.na(tox))
+rowmiss <- rowSums(is.na(tox))
+
+sum(tox==0, na.rm=TRUE)
+sum(is.na(tox), na.rm=FALSE)
+```
+
+
+
+
