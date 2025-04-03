@@ -66,7 +66,7 @@ mental <- read_excel("data_questionformodel.xlsx", sheet = "data_adj2")[,1:12]
 ## [sample] Table for Traumatic Events on Duty
 ```{r}
 # traumaticeventsonduty ####
-# Step 1: 生成带缩进信息的 gtsummary 表
+# Step 1: generate gtsummary table
 # traumatic_events_table <- cl_data %>%
 #   select(Traumatic.events.on.duty:Vehicle.Accidents) %>%  # Select Traumatic Events
 #   tbl_summary(
@@ -89,23 +89,23 @@ mental <- read_excel("data_questionformodel.xlsx", sheet = "data_adj2")[,1:12]
 #       mutate(indent = ifelse(variable == "Traumatic.events.on.duty", 0, 1))  # Add indentation column
 #   )
 # 
-# # Step 2: 将 gtsummary 表转为 flextable
+# # Step 2: transform gtsummary table to flextable
 # traumatic_events_flextable <- traumatic_events_table %>%
 #   as_flex_table() %>%
 #   flextable::autofit()
 # 
-# # Step 3: 手动应用缩进
+# # Step 3: indent manually
 # traumatic_events_flextable <- traumatic_events_flextable %>%
 #   flextable::padding(
-#     i = which(traumatic_events_table$table_body$indent == 1),  # 找到需要缩进的行
-#     padding.left = 20,  # 设置左侧缩进
+#     i = which(traumatic_events_table$table_body$indent == 1),  # find lines to indent
+#     padding.left = 20,  # set left indent
 #     part = "body"
 #   )
 # 
-# # Step 4: 让 "Traumatic Events on Duty" 行加粗
+# # Step 4: Bold the "Traumatic Events on Duty" line
 # traumatic_events_flextable <- traumatic_events_flextable %>%
 #   flextable::bold(
-#     i =  which(traumatic_events_table$table_body$variable == "Traumatic.events.on.duty"),  # 确定加粗的行
+#     i =  which(traumatic_events_table$table_body$variable == "Traumatic.events.on.duty"),  # confirm the bolded line 
 #     part = "body"
 #   )
 ```
@@ -1100,7 +1100,7 @@ combined_table
 
 ## 5. print the table
 ```{r}
-# 打印表格 ####
+# print the table ####
 ft <- bg(combined_table, bg = "white", part = "all")
 # save_as_image(ft, path = "demographic_table.png")
 
