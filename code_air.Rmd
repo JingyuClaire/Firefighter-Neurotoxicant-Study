@@ -1,0 +1,290 @@
+---
+title: "3rd dataset"
+author: "Jingyu Liang"
+date: "2024-11-05"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# air and wipe datasets (both in log scale)
+## air dataset
+```{r}
+personal_diff <- read_excel("neurotoxicant - air 0122_for_code.xlsx", sheet = "personal_entry_adj_difference")
+personal_diff <- as.data.frame(personal_diff)
+personal_diff <- personal_diff %>% rename(FFID=`SAMPLE ID`)
+
+# change to numeric values
+for (i in 1:ncol(personal_diff)){
+  personal_diff[,i] <- as.numeric(personal_diff[,i])
+}
+
+# change column names
+for (i in 2:ncol(personal_diff)) {
+  colnames(personal_diff)[i] = paste(colnames(personal_diff)[i], "_air", sep="")
+}
+
+# log scale
+personal_diff <- bind_cols(
+  personal_diff[1], 
+  lapply(personal_diff[,2:ncol(personal_diff)], function(x) log(x+1)))
+```
+
+delete those not significant elements in air dataset
+```{r}
+# get the significant cols
+significant_air <- c("FFID",paste0(significant_major, "_air"), paste0(significant_trace, "_air"))
+
+# delete those not significant elements
+personal_diff <- personal_diff[,colnames(personal_diff) %in% significant_air]
+```
+
+## wipe dataset log(post)-log(pre)
+```{r}
+# difference for major element
+major_diff <- major1st_log[,-1] - major2nd_log[,-1]
+major_diff <- bind_cols(major1st_log$FFID, major_diff)
+colnames(major_diff) <- c("FFID", gsub("1$","", colnames(major_diff)[2:11]))
+
+# difference for trace element
+trace_diff <- trace1st_log[,-1] - trace2nd_log[,-1]
+trace_diff <- bind_cols(trace1st_log$FFID, trace_diff)
+colnames(trace_diff) <- c("FFID", gsub("1$","", colnames(trace_diff)[2:15]))
+
+# merge major diff and trace diff
+wipe_diff <- major_diff %>% 
+  left_join(trace_diff, by = "FFID")
+
+# change to numeric values
+for (i in 1:ncol(wipe_diff)){
+  wipe_diff[,i] <- as.numeric(wipe_diff[,i])
+}
+
+# change column names
+for (i in 2:ncol(wipe_diff)) {
+  colnames(wipe_diff)[i] = paste(colnames(wipe_diff)[i], "_wipe", sep="")
+}
+
+# change all negative values to 0
+wipe_diff[wipe_diff < 0] <- 0
+```
+
+delete those not significant elements in wipe dataset
+```{r}
+# get the significant cols
+significant_wipe <- c("FFID",paste0(significant_major, "_wipe"), paste0(significant_trace, "_wipe"))
+
+# delete those not significant elements
+wipe_diff <- wipe_diff[,colnames(wipe_diff) %in% significant_wipe]
+```
+
+# correlation table
+post dataset for wipe
+Note: don't delete non-significant elements
+```{r}
+wipe_post <- major1st_log %>% left_join(trace1st_log, by = "FFID")
+
+# change column names
+colnames(wipe_post) <- c("FFID", gsub("1$","_post", colnames(wipe_post)[2:25]))
+
+# all concentrations: combine air and wipe(post) together
+allconcentration <- wipe_post %>% left_join(personal_diff, by = "FFID")
+```
+
+correlation table for all
+```{r}
+corr <- cor(allconcentration[, -1], use = "complete.obs", method = "spearman") 
+
+# Replace NA to 0
+corr[is.na(corr)] <- 0
+
+corr <- as.data.frame(corr)
+
+# Melt the correlation matrix into long format
+cor_melt <- melt(corr) 
+```
+
+## heatmap
+
+### air and wipe(post)
+deleted `P_air`, `Cu_air`, `Ni_air`, `Zn_air`, `Pb_air`
+deleted `Y_post`, `Se_post`, `Te_post`
+```{r}
+corr_clean <- corr %>% 
+  select(grep("air", names(corr))) %>% 
+  slice (grep("post",rownames(corr))) %>%
+  select(-`P_air`, -`Cu_air`, -`Ni_air`, -`Zn_air`, -`Pb_air`) %>% # drop some columns
+  rownames_to_column(var = "RowName") %>%     # generate a column containing row names
+  filter(!RowName %in% c("Y_post", "Se_post", "Te_post")) %>%  # Filter out specific rows
+  column_to_rownames(var = "RowName")              # Convert back to row names
+
+wipe_post_vs_air <- pheatmap(corr_clean, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+```
+
+### air
+Deleted P, Be, Ag, Te
+```{r}
+corr_air <- corr %>% 
+  select(grep("air", names(corr))) %>% 
+  slice (grep("air",rownames(corr))) %>%
+  select(-`P_air`, -`Be_air`, -`Ag_air`, -`Te_air`) %>%
+  rownames_to_column(var = "RowName") %>%          # Convert row names to a column
+  filter(!RowName %in% c("P_air", "Be_air", "Ag_air", "Te_air")) %>%  # Filter out specific rows
+  column_to_rownames(var = "RowName")              # Convert back to row names
+
+air <- pheatmap(corr_air, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+
+```
+
+### wipe (post)
+
+```{r}
+corr_wipe <- corr %>% select(grep("post", names(corr))) %>% slice (grep("post",rownames(corr)))
+
+wipe <- pheatmap(corr_wipe, display_numbers = TRUE, color = colorRampPalette(c("purple", "white", "orange"))(50))
+
+```
+
+# stack plot for air dataset
+## organize the data
+```{r}
+# divide by major and trace
+type <- c(2, rep(1, 10), rep(0, 14))
+personal_diff <- rbind(personal_diff, type)
+personal_m <- personal_diff %>% select(1, grep(1 , personal_diff[37,])) %>% 
+  slice(-nrow(personal_diff))
+personal_t <- personal_diff %>% select(1, grep(0, personal_diff[37,])) %>% 
+  slice(-nrow(personal_diff))
+personal_diff <- personal_diff[-37,]
+
+# pivot_longer
+personal_m_long <- personal_m %>% 
+  pivot_longer(2:ncol(personal_m), names_to = "name", values_to = "mg/m3")
+personal_m_long$type <- "major"
+
+personal_t_long <- personal_t %>% 
+  pivot_longer(2:ncol(personal_t), names_to = "name", values_to = "mg/m3")
+personal_t_long$type <- "trace"
+
+# merge major and minor 
+air_log <- bind_rows(personal_m_long, personal_t_long)
+air_log <- air_log %>% arrange(name)
+
+data <- air_log
+
+# correct the chemical name from Ag_air to Ag
+data$name <- gsub("_air$", "", data$name)
+
+data <- data %>% mutate(name = factor(name, levels = unique(name)))
+data <- data %>% mutate(type = factor(type, levels = unique(type)))
+
+
+# calculate the sum for each element post or pre fire and sum of all
+sum_personal <- data %>%
+  group_by(type,name) %>% 
+  summarise(`total_mg/m3` = sum(`mg/m3`, na.rm = TRUE), .groups = "drop") %>%
+  ungroup() %>%
+  group_by(type) %>%
+  mutate(sum = sum(`total_mg/m3`, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(desc(type), desc(`total_mg/m3`))
+
+# factor the name
+sum_personal <- sum_personal %>% mutate(name = factor(name, levels = unique(name)))
+sum_personal <- sum_personal %>% mutate(type = factor(type, levels = unique(type)))
+
+# mark the location for geom_text
+loc_half_sum1 <- c()
+majorrows <- grep("major", sum_personal$type)
+lastnum <- majorrows[length(majorrows)]
+for (i in majorrows ) {
+ loc_half_sum1[i] = sum(sum_personal$`total_mg/m3`[i:lastnum])-sum_personal$`total_mg/m3`[i]/2
+}
+
+loc_half_sum2 <- c()
+tracerows <- grep("trace", sum_personal$type)
+lastnumt <- tracerows[length(tracerows)]
+for (j in tracerows) {
+   loc_half_sum2[j-lastnum] = sum(sum_personal$`total_mg/m3`[j:lastnumt])-sum_personal$`total_mg/m3`[j]/2
+}
+ 
+sum_personal %<>% mutate(location = c(loc_half_sum1,loc_half_sum2))
+
+# divide into major and trace
+sum_major <- sum_personal %>% slice(grep("major", sum_personal$type))
+sum_trace <- sum_personal %>% slice(grep("trace", sum_personal$type))
+
+```
+
+
+stack bar plot 
+for all
+```{r}
+custom_palette <- c("#8DD3C7","#FFFFB3", "#BEBADA", "#FB8072", "#80B1D3",
+                    "#FDB462","#B3DE69", "#FCCDE5", "#D9D9D9", "#BC80BD",
+                    "#CCEBC5","#fb9a99", "#1b9e77", "#e31a1c", "#7570b3",
+                    "#e7298a","#66a61e", "#e6ab02", "#a6761d",
+                    "#666666","#a6cee3", "#1f78b4", "#b2df8a", "#33a02c")
+
+
+plot <- ggplot(sum_personal, aes(x=type, y=`total_mg/m3`, fill=name)) +
+  geom_bar(stat = "identity")+
+  scale_fill_manual(values = custom_palette) +
+  labs(
+    title = "Sum of Each Neurotoxicant Concentration (air)",
+    x = "Type",
+    y = "log(mg/m3)",
+    fill = "Neurotoxicants") +
+  theme_minimal() +
+  theme(legend.position = "none") + 
+  geom_text(
+     data = sum_personal[c(1:6, 11),],
+     aes(x = type, y = location, label = paste(name, round(`total_mg/m3`,2))), 
+     color = "black", size = 2.5, vjust = 0)
+
+```
+
+for major
+```{r}
+ggplot(sum_major, aes(x=type, y=`total_mg/m3`, fill=name)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(palette = "Set3" ) +
+  labs(
+    title = "Sum of Major Neurotoxicant Concentration (air)",
+    x = "Type",
+    y = "log(mg/m3)",
+    fill = "Neurotoxicants") +
+  theme_minimal() +
+  theme(legend.position = "none") + 
+  geom_text(
+     data = sum_major[1:4,],
+     aes(x = type, y = location, label = paste(name, round(`total_mg/m3`,2))), 
+     color = "black", size = 2.5, vjust = 0)
+  
+```
+
+
+stack bar plot 
+```{r}
+# Generate a palette with 14 colors
+custom_palette <- c("#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02", "#a6761d",
+                    "#666666", "#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", "#e31a1c")
+
+ggplot(sum_trace, aes(x=type, y=`total_mg/m3`, fill=name)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = custom_palette) +
+  labs(
+    title = "Sum of Trace Neurotoxicant Concentration (air)",
+    x = "Type",
+    y = "log(mg/m3)",
+    fill = "Neurotoxicants") +
+  theme_minimal() +
+  theme(legend.position = "none") + 
+  geom_text(
+     data = sum_trace[1:7,],
+     aes(x = type, y = location, label = paste(name, round(`total_mg/m3`,2))), 
+     color = "black", size = 2.5, vjust = 0)
+  
+```
