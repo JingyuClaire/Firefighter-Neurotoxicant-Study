@@ -1188,7 +1188,7 @@ shapiro.test(mental$CESD)
 
 # Modeling & scatter plot matrices
 ## prepare dataset
-Before running this chunk, run the chunks in 1st and 3rd dataset code, including box plots and deleting non-significant elements.
+Before running this chunk, run the chunks in air and wipe dataset code, including box plots and deleting non-significant elements.
 Note: we use wipe_diff and personal_diff **without** those non-significant elements
 we use *df* as the dataset of fitting models
 ```{r}
