@@ -1,0 +1,3169 @@
+---
+title: "Untitled"
+author: "Jingyu Liang"
+date: "2026-02-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(reshape2) # for melt()
+library(pheatmap)
+library(Hmisc) # for rcorr()
+library(knitr) # for kable
+library(writexl)
+library(bkmr)
+library(tibble)
+library(MASS)
+library(glmnet)
+library(mice)
+```
+
+# Toxic metals Air Dataset
+```{r}
+air_tox <- read_excel("for code neurotoxicant - air 10312025.xlsx",sheet = "air_tox")
+
+air_tox <- air_tox %>%
+  rename(`FFID` = `SAMPLE ID`) %>% 
+  mutate(FFID = as.numeric(str_sub(FFID, -2))) %>% 
+  arrange(`SAMPLE DATE`) %>% 
+  filter(!FFID %in% 79)
+
+# change the sample name (identify Blank row)
+air_tox <- air_tox %>%
+  mutate(
+    is_blank_row=if_else(
+      (!is.na(COMMENTS) & str_detect(COMMENTS, regex("Blank", ignore_case = TRUE)) ) , TRUE, FALSE
+    )
+  ) 
+
+# get the colnames
+tox_cols <- names(dplyr::select(air_tox, Ba:Pb))
+
+# ----subtract blank value from the same date----
+air_tox <- air_tox %>%
+  group_by(`SAMPLE DATE`) %>%
+  mutate(
+    across(
+      all_of(tox_cols),
+      ~ {
+        den_vec <- .x[is_blank_row]   # extract the blank value for this date
+
+        # If no blank found for this date → return NA
+        if (length(den_vec) == 0 || is.na(den_vec[1])) {
+          NA_real_
+        } else {
+          .x - den_vec[1]         # subtract the blank value
+        }
+      }
+    )
+  ) %>%
+  ungroup() 
+
+air_tox <- air_tox %>%
+  filter(!is_blank_row)
+
+# ---- imputation by detection limit; still have 0 ----
+
+# read the detection limit 
+mdl <- read_excel("Detection Limit_Air 1031.xlsx",sheet = "Sheet2")
+mdl_vec <- setNames(as.numeric(mdl[1,tox_cols]),tox_cols)
+
+# count imputation datapoints of all 0's
+impute_0_air_tox <- air_tox %>%
+  summarise(across(all_of(tox_cols), ~ sum(.x==0, na.rm=TRUE))) %>%
+  rowSums()
+
+# calculate percentage of 0s for each column
+zero_pct <- air_tox %>%
+  summarise(across(
+    all_of(tox_cols),
+    ~ mean(.x == 0, na.rm = TRUE) * 100
+  )) 
+
+zero_pct_long <- zero_pct %>%
+  pivot_longer(
+    everything(),
+    names_to  = "Variable",
+    values_to = "Zero_pct"
+  )
+
+# impute 0's with LOD/sqrt(2)
+air_tox <- air_tox %>%            # zero values
+  mutate(across(all_of(tox_cols), 
+                ~ ifelse(.x == 0,
+                         mdl_vec[cur_column()]/sqrt(2),
+                         .x))) 
+
+# count imputation datapoints of the negative's
+impute_negative_air_tox <- air_tox %>%
+  summarise(across(all_of(tox_cols), ~ sum(.x<0, na.rm=TRUE))) %>%
+  rowSums()
+
+# replace negative values with LOD/sqrt(2)
+air_tox <- air_tox %>% 
+  mutate(across(all_of(tox_cols), 
+                ~ ifelse(.x <0,
+                         mdl_vec[cur_column()]/sqrt(2),
+                         .x)))
+
+# count imputation datapoints of NA
+impute_NA_air_tox <- air_tox %>%
+  summarise(across(all_of(tox_cols), ~ sum(is.na(.x)))) %>%
+  rowSums()
+
+# impute the LOD/sqrt(2) into NA
+air_tox <- air_tox %>% 
+  mutate(across(all_of(tox_cols), 
+                ~ ifelse(is.na(.x),
+                         mdl_vec[cur_column()]/sqrt(2),
+                         .x)))
+
+# percentage of whole dataset LOD: only number of zero values
+perc_LOD_air_tox <- impute_0_air_tox/
+  length(unlist(air_tox[,-c(1:4)]))
+
+# ----divided by volume----
+air_tox <- air_tox %>%
+  mutate(`VOLUME/DATA`= as.numeric(`VOLUME/DATA`))
+
+# fill in the NA caused by in as.numeric
+air_tox[4,2] <- 124.19
+
+# divided by volume and the unit is μg/m3 or ng/l (same magnitude)
+air_tox <- air_tox %>%
+  mutate(
+    across(
+      all_of(tox_cols),           
+      ~ .x / `VOLUME/DATA`         # divide each column by the column VOLUME/DATA
+    )
+  ) 
+
+air_tox <- air_tox %>%
+  dplyr::select(-c(2:4, 29))
+
+
+# ----log scale----
+air_tox_log <- air_tox %>% mutate(across(all_of(tox_cols), ~log10(.x+0.0001428715))) %>% 
+  arrange(FFID)
+
+```
+
+summary table
+```{r}
+
+# Summarize all tox columns
+summary_table <- air_tox_log %>%
+  summarise(across(
+    all_of(tox_cols),
+    list(
+      Mean = ~ mean(.x, na.rm = TRUE),
+      SD = ~ sd(.x, na.rm = TRUE),
+      Median = ~ median(.x, na.rm = TRUE),
+      Min = ~ min(.x, na.rm = TRUE),
+      Max = ~ max(.x, na.rm = TRUE)
+    ),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", ".value"),
+               names_sep = "_") %>%
+  mutate(`%<LOD of all` = if_else(Variable == first(Variable),
+                           sprintf("%.1f%%", perc_LOD_air_tox * 100),
+                           ""))  %>%
+  # join per-variable zero percentages
+  left_join(zero_pct_long, by = "Variable") %>%
+  mutate(`%<LOD` = sprintf("%.1f%%", Zero_pct)) %>%
+  dplyr::select(`%<LOD of all`, Variable, `%<LOD`, Mean, SD, Median, Min, Max)
+
+# Show table
+kable(summary_table, digits = 3, align = 'c')
+# write_xlsx(summary_table, "air_tox_summary.xlsx")
+```
+
+# Toxic metals Wipe dataset
+```{r}
+# read into R
+wipe_tox <- read_excel("for code neurotoxicant - wipe 11012025.xlsx",sheet = "raw_data_entry")
+
+# reshape the data to get consistent with wipe_PAHs_log
+wipe_tox <- wipe_tox %>% 
+  pivot_longer(
+    cols = -FFID,
+    names_to = c("metals","time_code"),
+    names_pattern = "([A-Za-z0-9]+)([12])$",
+    values_to = "value"
+  ) %>% 
+  mutate(
+    Time = case_when(
+      time_code == "1" ~ "post",
+      time_code == "2" ~ "pre"
+    )
+  ) %>% 
+  dplyr::select(-time_code) %>% 
+  pivot_wider(
+    names_from = "metals",
+    values_from = "value"
+  ) %>% 
+  relocate(Time, .before = FFID)
+
+# remove the FFIDs that has single values: 58, 51, 60
+wipe_tox <- wipe_tox %>% 
+  filter(!FFID %in% c(58, 51, 60))
+
+# ----imputation with detection limit; still have 0----
+
+# read the detection limit in R
+mdl <- read_excel("Detection Limit_Air 1031.xlsx", sheet = "LOD_wipe_tox")
+mdl_vec <- setNames(as.numeric(mdl[1,tox_cols]),tox_cols)
+
+# count imputation datapoints of NA
+impute_NA_wipe_tox <- wipe_tox %>%
+  summarise(across(all_of(tox_cols), ~ sum(is.na(.x)))) %>%
+  rowSums()
+
+# count imputation datapoints of 0's
+impute_0_wipe_tox <- wipe_tox %>%
+  summarise(across(all_of(tox_cols), ~ sum(.x==0, na.rm=TRUE))) %>%
+  rowSums()
+
+# calculate percentage of 0s for each column
+zero_pct <- wipe_tox %>%
+  summarise(across(
+    all_of(tox_cols),
+    ~ mean(.x == 0, na.rm = TRUE) * 100
+  )) 
+
+zero_pct_long <- zero_pct %>%
+  pivot_longer(
+    everything(),
+    names_to  = "Variable",
+    values_to = "Zero_pct"
+  )
+
+# impute 0s & NAs with LOD/sqrt(2)
+wipe_tox <- wipe_tox %>%            # zero values
+  mutate(across(all_of(tox_cols), 
+                ~ ifelse(.x == 0,
+                         mdl_vec[cur_column()]/sqrt(2),
+                         .x))) %>%  # missing data
+  mutate(across(all_of(tox_cols), 
+                ~ ifelse(is.na(.x),
+                         mdl_vec[cur_column()]/sqrt(2),
+                         .x)))
+
+# percentage of LOD: only number of zero values
+perc_LOD_wipe_tox <- impute_0_wipe_tox/length(
+  unlist(wipe_tox[,-c(1:2)])
+)
+
+# ----change units to ppb; still have 0----
+# get major and trace cols
+major_cols <- names(dplyr::select(wipe_tox,Ba:Zn))
+trace_cols <- names(dplyr::select(wipe_tox,Be:Pb))
+
+# change units -> same as sheet "data_entry_adj"
+wipe_tox <- wipe_tox %>% 
+  mutate(across(all_of(major_cols), ~.x*1000/4.55406)) %>% 
+  mutate(across(all_of(trace_cols), ~.x/4.55406)) 
+
+# ----log scale; add a constant----
+wipe_tox_log <- wipe_tox %>% 
+  mutate(across(all_of(major_cols), ~log10(.x+0.0001428715))) %>% 
+  mutate(across(all_of(trace_cols), ~log10(.x+0.0001428715))) 
+```
+
+summary table
+```{r}
+
+# Summarize all tox columns
+summary_table <- wipe_tox_log %>%
+  summarise(across(
+    all_of(tox_cols),
+    list(
+      Mean = ~ mean(.x, na.rm = TRUE),
+      SD = ~ sd(.x, na.rm = TRUE),
+      Median = ~ median(.x, na.rm = TRUE),
+      Min = ~ min(.x, na.rm = TRUE),
+      Max = ~ max(.x, na.rm = TRUE)
+    ),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", ".value"),
+               names_sep = "_") %>%
+  mutate(`%<LOD of all` = if_else(Variable == first(Variable),
+                           sprintf("%.1f%%", perc_LOD_wipe_tox * 100),
+                           ""))  %>%
+  # join per-variable zero percentages
+  left_join(zero_pct_long, by = "Variable") %>%
+  mutate(`%<LOD` = sprintf("%.1f%%", Zero_pct)) %>%
+  dplyr::select(`%<LOD of all`, Variable, `%<LOD`, Mean, SD, Median, Min, Max)
+
+# Show table
+# kable(summary_table, digits = 3, align = 'c')
+# write_xlsx(summary_table, "wipe_tox_summary.xlsx")
+```
+
+
+## pre & post dataset & Difference
+```{r}
+wipe_pre_tox <- wipe_tox_log %>% filter(Time=="pre") %>% arrange(FFID)
+wipe_post_tox <- wipe_tox_log %>% filter(Time=="post") %>% arrange(FFID)
+
+wipe_diff_tox <- wipe_post_tox
+wipe_diff_tox[,3:ncol(wipe_diff_tox)] <- wipe_post_tox[,3:ncol(wipe_post_tox)] - wipe_pre_tox[,3:ncol(wipe_pre_tox)] 
+
+wipe_diff_tox <- wipe_diff_tox[,-1]
+
+wipe_pre_tox <- wipe_pre_tox %>% dplyr::select(-Time)
+# count imputation datapoints of the negative's
+impute_negative_wipe_tox <- wipe_diff_tox %>%
+  summarise(across(all_of(tox_cols), ~ sum(.x<0, na.rm=TRUE))) %>%
+  rowSums()
+
+perc_negative_wipe_tox <- impute_negative_wipe_tox/length(
+  unlist(wipe_diff_tox[,-1])
+)
+
+# change negative values to LOD/sqrt(2)
+wipe_diff_tox <- wipe_diff_tox %>%
+  mutate(across(all_of(major_cols), 
+                ~ ifelse(.x < 0,
+                         log10(mdl_vec[cur_column()]/sqrt(2)*1000/4.55406+
+                                 0.0001428715),
+                         .x ))) %>% 
+  mutate(across(all_of(trace_cols), 
+                ~ifelse(.x < 0,
+                        log10(mdl_vec[cur_column()]/sqrt(2)/4.55406+
+                                0.0001428715),
+                        .x )))
+
+```
+
+summary table
+```{r}
+
+# Summarize all tox columns
+summary_table <- wipe_diff_tox %>%
+  summarise(across(
+    all_of(tox_cols),
+    list(
+      Mean = ~ mean(.x, na.rm = TRUE),
+      SD = ~ sd(.x, na.rm = TRUE),
+      Median = ~ median(.x, na.rm = TRUE),
+      Min = ~ min(.x, na.rm = TRUE),
+      Max = ~ max(.x, na.rm = TRUE)
+    ),
+    .names = "{.col}_{.fn}"
+  )) %>%
+  pivot_longer(everything(),
+               names_to = c("Variable", ".value"),
+               names_sep = "_") %>%
+  mutate(`%<LOD` = if_else(Variable == first(Variable),
+                           sprintf("%.1f%%", perc_negative_wipe_tox * 100),
+                           "")) %>%
+  dplyr::select(`%<LOD`, Variable, Mean, SD, Median, Min, Max)
+
+```
+
+## Box plot for log wipe_tox data
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+id_col   <- "FFID"
+time_col <- "Time"
+chem_cols <- setdiff(names(wipe_tox_log), c(time_col, id_col))
+
+major_set <- c("S","Fe","P","Zn","Ba","Sr","Cu","Mn","Cr","Ni")
+trace_set <- setdiff(chem_cols, major_set)
+
+# 1) Paired Wilcoxon (pre vs post) for each chemical + BH
+get_p_one <- function(chem) {
+  wide <- wipe_tox_log %>%
+    dplyr::select(all_of(c(id_col, time_col, chem))) %>%
+    mutate(Time = as.character(.data[[time_col]])) %>%
+    distinct() %>%
+    tidyr::pivot_wider(
+      id_cols     = all_of(id_col),
+      names_from  = Time,
+      values_from = all_of(chem),
+      values_fn   = mean
+    ) %>%
+    filter(!is.na(pre) & !is.na(post))
+
+  n_pair <- nrow(wide)
+
+  pval <- if (n_pair >= 3) {
+    suppressWarnings(stats::wilcox.test(wide$post, wide$pre, paired = TRUE, exact = FALSE)$p.value)
+  } else {
+    NA_real_
+  }
+
+  tibble(Chemical = chem, n_pair = n_pair, p_value = pval)
+}
+
+p_all <- bind_rows(lapply(chem_cols, get_p_one)) %>%
+  mutate(q_value_bh = p.adjust(p_value, method = "BH"))
+
+# Keep only BH-significant chemicals for plotting
+sig_chems <- p_all %>%
+  filter(!is.na(q_value_bh) & q_value_bh < 0.05) %>%
+  pull(Chemical)
+
+# Stars based on BH-adjusted q-values (change to p_value if you want raw p)
+star_tbl <- p_all %>%
+  mutate(star = case_when(
+    is.na(q_value_bh)  ~ "",
+    q_value_bh < 0.001 ~ "***",
+    q_value_bh < 0.01  ~ "**",
+    q_value_bh < 0.05  ~ "*",
+    TRUE               ~ ""
+  )) %>%
+  dplyr::select(Chemical, star)
+
+# 2) Long format for plotting (convert log10 back to original scale)
+plot_dat <- wipe_tox_log %>%
+  mutate(Time = factor(.data[[time_col]], levels = c("pre", "post"))) %>%
+  pivot_longer(all_of(chem_cols), names_to = "Chemical", values_to = "Value_log10") %>%
+  mutate(
+    Chemical   = as.character(Chemical),
+    Value_log10 = as.numeric(Value_log10),
+    Value      = 10^Value_log10
+  ) %>%
+  filter(Chemical %in% sig_chems) %>%
+  filter(!is.na(Value), is.finite(Value), Value > 0)
+
+# 3) Order chemicals by max(Value) within major / trace
+max_tbl <- plot_dat %>%
+  group_by(Chemical) %>%
+  summarise(max_value = max(Value, na.rm = TRUE), .groups = "drop")
+
+major_order2 <- max_tbl %>%
+  filter(Chemical %in% major_set) %>%
+  arrange(desc(max_value)) %>%
+  pull(Chemical)
+
+trace_order2 <- max_tbl %>%
+  filter(Chemical %in% trace_set) %>%
+  arrange(desc(max_value)) %>%
+  pull(Chemical)
+
+# 4) Plot settings that match your requirements
+
+y_ticks <- c(1, 10, 100, 1000, 10000, 100000)
+
+y_lab_fun <- function(x) {
+  ifelse(x >= 1000, scales::scientific(x), as.character(x))
+}
+
+y_top_tick <- 100000
+y_star_pos <- y_top_tick + 10
+
+make_boxplot <- function(elements_order, title_text) {
+
+  dat <- plot_dat %>%
+    filter(Chemical %in% elements_order) %>%
+    mutate(Chemical = factor(Chemical, levels = elements_order))
+
+  if (nrow(dat) == 0) {
+    return(ggplot() + theme_void() + labs(title = title_text))
+  }
+
+  y_min <- min(dat$Value, na.rm = TRUE)
+  y_min <- max(y_min / 1.5, 1e-8)
+
+  y_max <- max(max(dat$Value, na.rm = TRUE), y_star_pos) * 1.05
+
+  ann <- tibble(Chemical = factor(elements_order, levels = elements_order)) %>%
+    left_join(star_tbl, by = "Chemical") %>%
+    mutate(star = ifelse(is.na(star), "", star),
+           y_pos = y_star_pos)
+
+  ggplot(dat, aes(x = Chemical, y = Value, fill = Time)) +
+    geom_boxplot(
+      na.rm = TRUE,
+      position = position_dodge(width = 0.8),
+      width = 0.65,
+      outlier.shape = 16,
+      outlier.size  = 1.6,
+      outlier.alpha = 0.8
+    ) +
+    geom_text(
+      data = ann,
+      aes(x = Chemical, y = y_pos, label = star),
+      inherit.aes = FALSE,
+      color = "black",
+      size = 5,
+      vjust = 0
+    ) +
+    scale_fill_manual(
+      values = c("pre" = "yellow", "post" = "lightblue"),
+      name = "Pre/Post-Fire",
+      labels = c("pre" = "Pre", "post" = "Post")
+    ) +
+    scale_y_log10(
+      breaks = y_ticks,
+      labels = y_lab_fun,
+      expand = expansion(mult = c(0.02, 0.06))
+    ) +
+    coord_cartesian(
+      ylim = c(y_min, y_max),
+      clip = "off"
+    ) +
+    labs(
+      x = "Toxic metals",
+      y = "Parts Per Billion",
+      title = title_text
+    ) +
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),
+      plot.margin = margin(t = 25, r = 20, b = 10, l = 10),
+      axis.text.x = element_text(hjust = 0.5)
+    )
+}
+
+# 5) Make plots A (major) and B (trace)
+p_major <- make_boxplot(
+  major_order2,
+  "Pre vs Post concentrations by major elements"
+)
+
+p_trace <- make_boxplot(
+  trace_order2,
+  "Pre vs Post concentrations by trace elements"
+)
+
+p_major
+p_trace
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+id_col   <- "FFID"
+time_col <- "Time"
+chem_cols <- setdiff(names(wipe_tox_log), c(time_col, id_col))
+
+major_set <- c("S","Fe","P","Zn","Ba","Sr","Cu","Mn","Cr","Ni")
+trace_set <- setdiff(chem_cols, major_set)
+
+# 1) Paired Wilcoxon (pre vs post) for each chemical + BH
+get_p_one <- function(chem) {
+  wide <- wipe_tox_log %>%
+    dplyr::select(all_of(c(id_col, time_col, chem))) %>%
+    mutate(Time = as.character(.data[[time_col]])) %>%
+    distinct() %>%
+    tidyr::pivot_wider(
+      id_cols     = all_of(id_col),
+      names_from  = Time,
+      values_from = all_of(chem),
+      values_fn   = mean
+    ) %>%
+    filter(!is.na(pre) & !is.na(post))
+
+  n_pair <- nrow(wide)
+
+  pval <- if (n_pair >= 3) {
+    suppressWarnings(stats::wilcox.test(wide$post, wide$pre, paired = TRUE, exact = FALSE)$p.value)
+  } else {
+    NA_real_
+  }
+
+  tibble(Chemical = chem, n_pair = n_pair, p_value = pval)
+}
+
+p_all <- bind_rows(lapply(chem_cols, get_p_one)) %>%
+  mutate(q_value_bh = p.adjust(p_value, method = "BH"))
+
+# Keep only BH-significant chemicals
+sig_chems <- p_all %>%
+  filter(!is.na(q_value_bh) & q_value_bh < 0.05) %>%
+  pull(Chemical)
+
+# Stars based on BH-adjusted q-values
+star_tbl <- p_all %>%
+  mutate(star = case_when(
+    is.na(q_value_bh)  ~ "",
+    q_value_bh < 0.001 ~ "***",
+    q_value_bh < 0.01  ~ "**",
+    q_value_bh < 0.05  ~ "*",
+    TRUE               ~ ""
+  )) %>%
+  dplyr::select(Chemical, star)
+
+# 2) Long format for plotting (convert log10 back)
+plot_dat <- wipe_tox_log %>%
+  mutate(Time = factor(.data[[time_col]], levels = c("pre", "post"))) %>%
+  pivot_longer(all_of(chem_cols), names_to = "Chemical", values_to = "Value_log10") %>%
+  mutate(
+    Chemical    = as.character(Chemical),
+    Value_log10 = as.numeric(Value_log10),
+    Value       = 10^Value_log10
+  ) %>%
+  filter(Chemical %in% sig_chems) %>%
+  filter(!is.na(Value), is.finite(Value), Value > 0)
+
+# 3) Order chemicals by max(Value) within major / trace
+max_tbl <- plot_dat %>%
+  group_by(Chemical) %>%
+  summarise(max_value = max(Value, na.rm = TRUE), .groups = "drop")
+
+major_order2 <- max_tbl %>%
+  filter(Chemical %in% major_set) %>%
+  arrange(desc(max_value)) %>%
+  pull(Chemical)
+
+trace_order2 <- max_tbl %>%
+  filter(Chemical %in% trace_set) %>%
+  arrange(desc(max_value)) %>%
+  pull(Chemical)
+
+# 4) ONE unified y-axis range for BOTH A and B
+y_ticks <- c(1, 10, 100, 1000, 10000, 100000)
+y_lab_fun <- function(x) ifelse(x >= 1000, scales::scientific(x), as.character(x))
+
+# global min/max across ALL data that will be plotted (major + trace)
+y_min_global <- min(plot_dat$Value, na.rm = TRUE)
+y_min_global <- max(y_min_global / 1.5, 1e-12)  # buffer + safety
+
+y_top_tick <- 100000
+y_star_pos <- y_top_tick + 10
+
+y_max_data <- max(plot_dat$Value, na.rm = TRUE)
+y_max_global <- max(y_max_data, y_star_pos) * 1.08  # headroom so stars are inside
+
+# 5) Plot helper: same ylim for both, stars at 100000+10
+make_boxplot <- function(elements_order, title_text) {
+
+  dat <- plot_dat %>%
+    filter(Chemical %in% elements_order) %>%
+    mutate(Chemical = factor(Chemical, levels = elements_order))
+
+  if (nrow(dat) == 0) {
+    return(ggplot() + theme_void() + labs(title = title_text))
+  }
+
+  ann <- tibble(Chemical = factor(elements_order, levels = elements_order)) %>%
+    left_join(star_tbl, by = "Chemical") %>%
+    mutate(
+      star = ifelse(is.na(star), "", star),
+      y_pos = y_star_pos
+    )
+
+  ggplot(dat, aes(x = Chemical, y = Value, fill = Time)) +
+    geom_boxplot(
+      na.rm = TRUE,
+      position = position_dodge(width = 0.8),
+      width = 0.65,
+      outlier.shape = 16,
+      outlier.size  = 1.6,
+      outlier.alpha = 0.8
+    ) +
+    geom_text(
+      data = ann,
+      aes(x = Chemical, y = y_pos, label = star),
+      inherit.aes = FALSE,
+      color = "black",
+      size = 5,
+      vjust = 0
+    ) +
+    scale_fill_manual(
+      values = c("pre" = "yellow", "post" = "lightblue"),
+      name = "Pre/Post-Fire",
+      labels = c("pre" = "Pre", "post" = "Post")
+    ) +
+    scale_y_log10(
+      breaks = y_ticks,
+      labels = y_lab_fun,
+      expand = expansion(mult = c(0.02, 0.02))
+    ) +
+    coord_cartesian(
+      ylim = c(y_min_global, y_max_global),
+      clip = "off"
+    ) +
+    labs(
+      x = "Toxic metals",
+      y = "Parts Per Billion",
+      title = title_text
+    ) +
+    theme_minimal() +
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),
+      plot.margin = margin(t = 18, r = 18, b = 10, l = 10),
+      axis.text.x = element_text(hjust = 0.5),
+      legend.position = "right"
+    )
+}
+
+# 6) A (major) and B (trace)
+p_major <- make_boxplot(
+  major_order2,
+  "Pre vs Post concentrations by major elements"
+)
+
+p_trace <- make_boxplot(
+  trace_order2,
+  "Pre vs Post concentrations by trace elements"
+)
+
+p_major
+p_trace
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+id_col   <- "FFID"
+time_col <- "Time"
+chem_cols <- setdiff(names(wipe_tox_log), c(time_col, id_col))
+
+major_set <- c("S","Fe","P","Zn","Ba","Sr","Cu","Mn","Cr","Ni")
+trace_set <- setdiff(chem_cols, major_set)
+
+# 1) Paired Wilcoxon (pre vs post) for each chemical + BH
+get_p_one <- function(chem) {
+  wide <- wipe_tox_log %>%
+    dplyr::select(all_of(c(id_col, time_col, chem))) %>%
+    mutate(Time = as.character(.data[[time_col]])) %>%
+    distinct() %>%
+    tidyr::pivot_wider(
+      id_cols     = all_of(id_col),
+      names_from  = Time,
+      values_from = all_of(chem),
+      values_fn   = mean
+    ) %>%
+    filter(!is.na(pre) & !is.na(post))
+
+  n_pair <- nrow(wide)
+  pval <- if (n_pair >= 3) {
+    suppressWarnings(stats::wilcox.test(wide$post, wide$pre, paired = TRUE, exact = FALSE)$p.value)
+  } else {
+    NA_real_
+  }
+
+  tibble(Chemical = chem, n_pair = n_pair, p_value = pval)
+}
+
+p_all <- bind_rows(lapply(chem_cols, get_p_one)) %>%
+  mutate(q_value_bh = p.adjust(p_value, method = "BH"))
+
+sig_chems <- p_all %>%
+  filter(!is.na(q_value_bh) & q_value_bh < 0.05) %>%
+  pull(Chemical)
+
+star_tbl <- p_all %>%
+  mutate(star = case_when(
+    is.na(q_value_bh)  ~ "",
+    q_value_bh < 0.001 ~ "***",
+    q_value_bh < 0.01  ~ "**",
+    q_value_bh < 0.05  ~ "*",
+    TRUE               ~ ""
+  )) %>%
+  dplyr::select(Chemical, star)
+
+# 2) Long format for plotting (convert log10 back)
+plot_dat <- wipe_tox_log %>%
+  mutate(Time = factor(.data[[time_col]], levels = c("pre", "post"))) %>%
+  pivot_longer(all_of(chem_cols), names_to = "Chemical", values_to = "Value_log10") %>%
+  mutate(
+    Chemical    = as.character(Chemical),
+    Value_log10 = as.numeric(Value_log10),
+    Value       = 10^Value_log10
+  ) %>%
+  filter(Chemical %in% sig_chems) %>%
+  filter(!is.na(Value), is.finite(Value), Value >= 0)
+
+# 3) Order chemicals by max(Value) within major / trace
+max_tbl <- plot_dat %>%
+  group_by(Chemical) %>%
+  summarise(max_value = max(Value, na.rm = TRUE), .groups = "drop")
+
+major_order2 <- max_tbl %>%
+  filter(Chemical %in% major_set) %>%
+  arrange(desc(max_value)) %>%
+  pull(Chemical)
+
+trace_order2 <- max_tbl %>%
+  filter(Chemical %in% trace_set) %>%
+  arrange(desc(max_value)) %>%
+  pull(Chemical)
+
+# 4) Shifted log axis:
+c_shift <- 1/9
+
+y_ticks_raw    <- c(1, 10, 100, 1000, 10000, 100000)
+y_breaks_shift <- y_ticks_raw + c_shift
+y_lab_fun <- function(x_raw) ifelse(x_raw >= 1000, scales::scientific(x_raw), as.character(x_raw))
+
+plot_dat2 <- plot_dat %>%
+  mutate(Value_shift = Value + c_shift)
+
+y_lower_view_shift <- c_shift * 0.75
+
+y_top_tick_raw      <- 100000
+y_star_raw          <- y_top_tick_raw + 10
+y_star_shift        <- y_star_raw + c_shift
+y_upper_view_shift  <- (y_star_raw * 1.06) + c_shift
+
+# 5) Plot helper (no title/subtitle/caption; legend no title)
+make_boxplot <- function(elements_order) {
+
+  dat <- plot_dat2 %>%
+    filter(Chemical %in% elements_order) %>%
+    mutate(Chemical = factor(Chemical, levels = elements_order))
+
+  if (nrow(dat) == 0) {
+    return(ggplot() + theme_void())
+  }
+
+  ann <- tibble(Chemical = factor(elements_order, levels = elements_order)) %>%
+    left_join(star_tbl, by = "Chemical") %>%
+    mutate(star = ifelse(is.na(star), "", star))
+
+  ggplot(dat, aes(x = Chemical, y = Value_shift, fill = Time)) +
+    geom_boxplot(
+      na.rm = TRUE,
+      position = position_dodge(width = 0.8),
+      width = 0.65,
+      outlier.shape = 16,
+      outlier.size  = 1.6,
+      outlier.alpha = 0.8
+    ) +
+    geom_text(
+      data = ann,
+      aes(x = Chemical, y = y_star_shift, label = star),
+      inherit.aes = FALSE,
+      color = "black",
+      size = 5,
+      vjust = 0
+    ) +
+    scale_fill_manual(
+      values = c("pre" = "yellow", "post" = "lightblue"),
+      labels = c("pre" = "pre", "post" = "post"),
+      name = NULL
+    ) +
+    scale_y_log10(
+      breaks = y_breaks_shift,
+      labels = y_lab_fun(y_ticks_raw),
+      expand = expansion(mult = c(0, 0))
+    ) +
+    coord_cartesian(
+      ylim = c(y_lower_view_shift, y_upper_view_shift),
+      clip = "off"
+    ) +
+    labs(
+      x = "Toxic metals",
+      y = "Parts Per Billion"
+    ) +
+    theme_minimal() +
+    theme(
+      legend.title = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.background = element_blank(),
+      axis.line = element_line(colour = "black"),
+      plot.margin = margin(t = 10, r = 18, b = 10, l = 10),
+      axis.text.x = element_text(hjust = 0.5)
+    )
+}
+
+p_major <- make_boxplot(major_order2)
+p_trace <- make_boxplot(trace_order2)
+
+p_major
+p_trace
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+
+median_tbl <- wipe_tox_log %>%
+  mutate(Time = factor(.data[[time_col]], levels = c("pre", "post"))) %>%
+  pivot_longer(all_of(chem_cols), names_to = "Chemical", values_to = "Value_log10") %>%
+  filter(Chemical %in% sig_chems) %>%
+  filter(!is.na(Value_log10)) %>%
+  mutate(
+    Value_log10 = as.numeric(Value_log10),
+    Value = 10^Value_log10
+  ) %>%
+  group_by(Chemical, Time) %>%
+  summarise(
+    n = dplyr::n(),
+    median_value = median(Value, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Chemical, Time)
+
+median_tbl
+
+median_tbl_wide <- median_tbl %>%
+  dplyr::select(Chemical, Time, median_value) %>%
+  pivot_wider(names_from = Time, values_from = median_value)
+
+median_tbl_wide
+```
+
+# Models Data
+## tox: tox_lr
+```{r}
+# ---- add sum cols for major and trace ----
+# major_air
+air_tox_log$major_tox_a <- rowSums(air_tox_log[major_cols], na.rm = TRUE)
+air_tox_log$trace_tox_a <- rowSums(air_tox_log[trace_cols], na.rm = TRUE)
+wipe_diff_tox$major_tox_w <- rowSums(wipe_diff_tox[major_cols], na.rm = TRUE)
+wipe_diff_tox$trace_tox_w <- rowSums(wipe_diff_tox[trace_cols], na.rm = TRUE)
+wipe_pre_tox$major_tox_w <- rowSums(wipe_pre_tox[major_cols], na.rm = TRUE)
+wipe_pre_tox$trace_tox_w <- rowSums(wipe_pre_tox[trace_cols], na.rm = TRUE)
+
+# ---- mark "_wipe" & "_air" & summation----
+
+# mark column names as _wipe
+names(wipe_diff_tox)[2:(ncol(wipe_diff_tox)-2)] <- paste0(
+  names(wipe_diff_tox)[2:(ncol(wipe_diff_tox)-2)],"_wipe"
+)
+names(wipe_pre_tox)[2:(ncol(wipe_pre_tox)-2)] <- paste0(
+  names(wipe_pre_tox)[2:(ncol(wipe_pre_tox)-2)],"_wipe"
+)
+
+# mark the air columns
+names(air_tox_log)[2:(ncol(air_tox_log)-2)] <- paste0(
+  names(air_tox_log)[2:(ncol(air_tox_log)-2)],"_air"
+)
+
+# form the dataset for linear regression
+tox_wipe_lr <- wipe_diff_tox %>%
+  left_join(mh, by = "FFID")
+# tox_wipe_lr <- wipe_pre_tox %>% 
+#   left_join(mh, by = "FFID") # !!or wipe_diff_tox!!
+
+tox_air_lr <- air_tox_log %>% 
+  left_join(mh, by = "FFID")
+
+# get the column names of all tox (wipe and air)
+# tox_wipe_air_cols <- names(tox_lr)[c(2:49)]
+
+# sum
+tox_air_lr$sum_air_tox <- rowSums(tox_air_lr[,grep("_air$",names(tox_air_lr))], na.rm = TRUE)
+tox_wipe_lr$sum_wipe_tox <- rowSums(tox_wipe_lr[,grep("_wipe$",names(tox_wipe_lr))], na.rm = TRUE)
+
+```
+
+## wipe PAHs & tox: data_lmm
+```{r}
+data_lmm <- wipe_PAHs_log %>% 
+  left_join(mh, by = "FFID") %>% 
+  left_join(wipe_tox_log, by = c("FFID", "Time")) 
+```
+
+
+# Corr table for air and wipe-diff
+```{r}
+air_metal_data <- tox_air_lr %>%
+  dplyr::select(-c(sum_air_tox,major_tox_a,trace_tox_a)) %>% 
+  dplyr::select(-all_of(26:36))
+
+air_metal_data <- na.omit(air_metal_data)
+
+wipe_metal_data <- wipe_diff_tox %>%
+  dplyr::select(-c(major_tox_w,trace_tox_w))
+
+wipe_metal_data <- na.omit(wipe_metal_data)
+
+air_wipepost_metal_data <- air_metal_data %>% left_join(wipe_metal_data, by="FFID") %>% dplyr::select(-c(FFID))
+air_wipepost_metal_data <- na.omit(air_wipepost_metal_data)
+
+# Compute correlation matrix 
+cor_table <- cor(air_wipepost_metal_data, use = "pairwise.complete.obs", method = "spearman")
+mh_vars <- names(air_wipepost_metal_data)[1:24]
+toxic_vars <- setdiff(colnames(air_wipepost_metal_data), mh_vars)
+cor_mh_tox <- cor_table[toxic_vars,mh_vars]
+
+pheatmap(
+  cor_mh_tox,
+  display_numbers = TRUE,
+  fontsize_number = 9,
+  number_color = "black",  
+  color = colorRampPalette(c("purple", "white", "orange"))(50),
+  main = "Spearman correlations between mental health outcomes and air toxicants"
+)
+
+# Do BH correction
+# Spearman correlation and p-values
+res <- rcorr(as.matrix(air_wipepost_metal_data), type = "spearman")
+
+# Extract unique (upper-triangle) p-values
+pvals <- res$P[upper.tri(res$P)]
+
+# Apply BH correction
+pvals_adj <- p.adjust(pvals, method = "BH")
+
+# Put adjusted p-values back into a symmetric matrix
+P_adj <- matrix(NA, nrow = nrow(res$P), ncol = ncol(res$P))
+rownames(P_adj) <- colnames(P_adj) <- colnames(air_wipepost_metal_data)
+P_adj[upper.tri(P_adj)] <- pvals_adj
+P_adj[lower.tri(P_adj)] <- t(P_adj)[lower.tri(P_adj)]
+diag(P_adj) <- 0  # diagonal correlations are 1, no p-value
+
+# 5) Final results
+cor_table <- res$r         # Spearman correlations
+p_table_adj <- P_adj       # BH-adjusted p-values
+
+p_mh_tox   <- p_table_adj[mh_vars, toxic_vars]
+
+sum(p_mh_tox < 0.05, na.rm = TRUE)
+
+# significance marks (BH-adjusted)
+sig_mark <- ifelse(!is.na(p_mh_tox) & p_mh_tox < 0.05, "*", "")
+
+# labels shown inside cells: correlation + star
+num_labels <- matrix(
+  ifelse(is.na(cor_mh_tox), "",
+         sprintf("%.2f%s", cor_mh_tox, sig_mark)),
+  nrow = nrow(cor_mh_tox),
+  ncol = ncol(cor_mh_tox),
+  dimnames = dimnames(cor_mh_tox)
+)
+
+pheatmap(
+  cor_mh_tox,
+  display_numbers = num_labels,
+  number_color = "black",
+  fontsize_number = 9,
+  color = colorRampPalette(c("purple", "white", "orange"))(50)
+)
+```
+
+# Corr table for all air tox & mh
+```{r}
+library(dplyr)
+library(Hmisc)
+library(ggplot2)
+
+air_metal_data <- tox_air_lr %>%
+  dplyr::select(-c(sum_air_tox, major_tox_a, trace_tox_a, FFID))
+
+air_metal_data <- na.omit(air_metal_data)
+
+# Compute correlation matrix
+cor_table <- cor(air_metal_data, use = "pairwise.complete.obs", method = "spearman")
+mh_vars <- c("CESD", "CESD_bi", "ASI", "ASI_s", "ASI_c", "ASI_p",
+             "PCL", "FAST", "FAST_bi", "PCL_bi", "ASI_bi")
+toxic_vars <- setdiff(colnames(cor_table), mh_vars)
+cor_mh_tox <- cor_table[mh_vars, toxic_vars]
+
+# Do BH correction
+# Spearman correlation and p-values
+res <- rcorr(as.matrix(air_metal_data), type = "spearman")
+
+# Extract unique (upper-triangle) p-values
+pvals <- res$P[upper.tri(res$P)]
+
+# Apply BH correction
+pvals_adj <- p.adjust(pvals, method = "BH")
+
+# Put adjusted p-values back into a symmetric matrix
+P_adj <- matrix(NA, nrow = nrow(res$P), ncol = ncol(res$P))
+rownames(P_adj) <- colnames(P_adj) <- colnames(air_metal_data)
+P_adj[upper.tri(P_adj)] <- pvals_adj
+P_adj[lower.tri(P_adj)] <- t(P_adj)[lower.tri(P_adj)]
+diag(P_adj) <- 0
+
+# Final results
+cor_table <- res$r
+p_table_adj <- P_adj
+
+p_mh_tox <- p_table_adj[mh_vars, toxic_vars]
+
+sum(p_mh_tox < 0.05, na.rm = TRUE)
+
+# labels shown inside cells: correlation only
+num_labels <- matrix(
+  ifelse(is.na(cor_mh_tox), "",
+         sprintf("%.2f", cor_mh_tox)),
+  nrow = nrow(cor_mh_tox),
+  ncol = ncol(cor_mh_tox),
+  dimnames = dimnames(cor_mh_tox)
+)
+
+# Convert to plotting data frame
+air_plot_df <- as.data.frame(as.table(cor_mh_tox))
+colnames(air_plot_df) <- c("Outcome", "Toxicant", "rho")
+
+air_plot_df$p_adj <- as.vector(p_mh_tox)
+air_plot_df$significant <- !is.na(air_plot_df$p_adj) & air_plot_df$p_adj < 0.05
+air_plot_df$label <- as.vector(num_labels)
+
+ggplot(air_plot_df, aes(x = Toxicant, y = Outcome, fill = rho)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(
+    data = subset(air_plot_df, !significant),
+    aes(label = label),
+    color = "black",
+    size = 3.2
+  ) +
+  geom_text(
+    data = subset(air_plot_df, significant),
+    aes(label = label),
+    color = "black",
+    size = 4.2,
+    fontface = "bold"
+  ) +
+  scale_fill_gradient2(
+    low = "purple",
+    mid = "white",
+    high = "orange",
+    midpoint = 0,
+    name = NULL
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 11),
+    axis.text.y = element_text(color = "black", size = 11),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(color = "black", size = 13, hjust = 0.5),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10)
+  )
+
+
+```
+
+# Corr table for all wipe tox & mh
+```{r}
+library(dplyr)
+library(Hmisc)
+library(ggplot2)
+
+wipe_metal_data <- tox_wipe_lr %>%
+  dplyr::select(-c(sum_wipe_tox, major_tox_w, trace_tox_w, FFID))
+
+wipe_metal_data <- na.omit(wipe_metal_data)
+
+# Compute correlation matrix
+cor_table <- cor(wipe_metal_data, use = "pairwise.complete.obs", method = "spearman")
+mh_vars <- c("CESD", "CESD_bi", "ASI", "ASI_s", "ASI_c", "ASI_p",
+             "PCL", "FAST", "FAST_bi", "PCL_bi", "ASI_bi")
+toxic_vars <- setdiff(colnames(cor_table), mh_vars)
+cor_mh_tox <- cor_table[mh_vars, toxic_vars]
+
+# Do BH correction
+# Spearman correlation and p-values
+res <- rcorr(as.matrix(wipe_metal_data), type = "spearman")
+
+# Extract unique (upper-triangle) p-values
+pvals <- res$P[upper.tri(res$P)]
+
+# Apply BH correction
+pvals_adj <- p.adjust(pvals, method = "BH")
+
+# Put adjusted p-values back into a symmetric matrix
+P_adj <- matrix(NA, nrow = nrow(res$P), ncol = ncol(res$P))
+rownames(P_adj) <- colnames(P_adj) <- colnames(wipe_metal_data)
+P_adj[upper.tri(P_adj)] <- pvals_adj
+P_adj[lower.tri(P_adj)] <- t(P_adj)[lower.tri(P_adj)]
+diag(P_adj) <- 0
+
+# Final results
+cor_table <- res$r
+p_table_adj <- P_adj
+
+p_mh_tox <- p_table_adj[mh_vars, toxic_vars]
+
+sum(p_mh_tox < 0.05, na.rm = TRUE)
+
+# labels shown inside cells: correlation only
+num_labels <- matrix(
+  ifelse(is.na(cor_mh_tox), "",
+         sprintf("%.2f", cor_mh_tox)),
+  nrow = nrow(cor_mh_tox),
+  ncol = ncol(cor_mh_tox),
+  dimnames = dimnames(cor_mh_tox)
+)
+
+# Convert to plotting data frame
+wipe_plot_df <- as.data.frame(as.table(cor_mh_tox))
+colnames(wipe_plot_df) <- c("Outcome", "Toxicant", "rho")
+
+wipe_plot_df$p_adj <- as.vector(p_mh_tox)
+wipe_plot_df$significant <- !is.na(wipe_plot_df$p_adj) & wipe_plot_df$p_adj < 0.05
+wipe_plot_df$label <- as.vector(num_labels)
+
+ggplot(wipe_plot_df, aes(x = Toxicant, y = Outcome, fill = rho)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(
+    data = subset(wipe_plot_df, !significant),
+    aes(label = label),
+    color = "black",
+    size = 3.2
+  ) +
+  geom_text(
+    data = subset(wipe_plot_df, significant),
+    aes(label = label),
+    color = "black",
+    size = 4.2,
+    fontface = "bold"
+  ) +
+  scale_fill_gradient2(
+    low = "purple",
+    mid = "white",
+    high = "orange",
+    midpoint = 0,
+    name = NULL
+  ) +
+  labs(
+    x = NULL,
+    y = NULL
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, color = "black", size = 11),
+    axis.text.y = element_text(color = "black", size = 11),
+    axis.title.x = element_blank(),
+    axis.title.y = element_blank(),
+    plot.title = element_text(color = "black", size = 13, hjust = 0.5),
+    legend.title = element_blank(),
+    legend.text = element_text(color = "black", size = 10)
+  )
+
+
+```
+
+
+
+
+# scatter plot of FAST, CESD, PCL, ASI
+```{r}
+scatter_df <- tox_wipe_lr %>% dplyr::select(FAST, CESD, PCL, ASI)
+
+panel.cor <- function(x, y, digits = 2, prefix = "", cex.cor = 1.2) {
+  
+  op <- par(usr = c(0, 1, 0, 1))  
+  on.exit(par(op))  
+  r <- cor(x, y, method = "spearman", use = "complete.obs")  
+  txt <- formatC(r, format = "f", digits = digits)  
+
+  text(0.5, 0.5, paste0(prefix, txt), cex = cex.cor)
+}
+
+panel.points <- function(x, y, ...) {
+  points(x, y, pch = 1, col = "black", ...)  # Custom styling for points
+  
+  abline(lm(y ~ x), col = "red", lwd = 1)
+  
+  lines(
+    stats::lowess(x, y, f = 0.75),
+    col = "blue",
+    lwd = 2
+  )
+}
+
+pairs(
+  scatter_df,
+  upper.panel = panel.cor,      
+  lower.panel = panel.points,   
+  diag.panel = NULL,            
+  main = "mental health domains"
+)
+
+```
+
+```{r}
+library(dplyr)
+
+scatter_df <- tox_wipe_lr %>%
+  dplyr::select(FAST, CESD, PCL, ASI)
+
+vars <- names(scatter_df)
+
+# 1) Compute all Spearman p-values, then BH-adjust across all unique pairs
+pair_list <- combn(vars, 2, simplify = FALSE)
+
+cor_res <- lapply(pair_list, function(v) {
+  xname <- v[1]; yname <- v[2]
+  x <- scatter_df[[xname]]
+  y <- scatter_df[[yname]]
+  ok <- complete.cases(x, y)
+  n_pair <- sum(ok)
+
+  if (n_pair >= 3) {
+    ct <- suppressWarnings(stats::cor.test(x[ok], y[ok], method = "spearman", exact = FALSE))
+    data.frame(
+      var1 = xname,
+      var2 = yname,
+      n_pair = n_pair,
+      rho = unname(ct$estimate),
+      p_value = ct$p.value,
+      stringsAsFactors = FALSE
+    )
+  } else {
+    data.frame(
+      var1 = xname,
+      var2 = yname,
+      n_pair = n_pair,
+      rho = NA_real_,
+      p_value = NA_real_,
+      stringsAsFactors = FALSE
+    )
+  }
+})
+
+cor_tbl <- do.call(rbind, cor_res)
+cor_tbl$q_value_bh <- p.adjust(cor_tbl$p_value, method = "BH")
+
+# helper to fetch BH q for (x,y) regardless of ordering
+get_q <- function(xname, yname, tab) {
+  i <- which((tab$var1 == xname & tab$var2 == yname) | (tab$var1 == yname & tab$var2 == xname))
+  if (length(i) == 1) tab$q_value_bh[i] else NA_real_
+}
+
+# 2) Upper panel: show rho, and add * if BH-significant (q < 0.05)
+panel.cor.bh <- function(x, y, digits = 2, cex.cor = 1.2, ...) {
+  xname <- deparse(substitute(x))
+  yname <- deparse(substitute(y))
+
+  r <- suppressWarnings(cor(x, y, method = "spearman", use = "complete.obs"))
+  q <- get_q(xname, yname, cor_tbl)
+
+  star <- if (!is.na(q) && q < 0.05) "*" else ""
+  txt <- formatC(r, format = "f", digits = digits)
+
+  op <- par(usr = c(0, 1, 0, 1))
+  on.exit(par(op))
+
+  text(0.5, 0.55, txt, cex = cex.cor)
+  if (nzchar(star)) text(0.5, 0.35, star, cex = cex.cor * 1.4)
+}
+
+# 3) Lower panel: scatter + lm line + lowess smooth (same idea as you had)
+panel.points <- function(x, y, ...) {
+  points(x, y, pch = 1, col = "black", ...)
+  abline(lm(y ~ x), col = "red", lwd = 1)
+  lines(stats::lowess(x, y, f = 0.75), col = "blue", lwd = 2)
+}
+
+# 4) Draw plot
+pairs(
+  scatter_df,
+  upper.panel = panel.cor.bh,
+  lower.panel = panel.points,
+  diag.panel = NULL,
+  main = "mental health domains (Spearman rho; * indicates BH q < 0.05)"
+)
+```
+
+
+
+
+
+# (1) Covariates & LASSO
+```{r}
+covar <- read_excel("data_questionformodel_onlydemograph 12312025.xlsx", sheet = "data_adj2")
+FH_yesno <- read_excel("data_questionformodel_onlyFHyesno 02202026.xlsx", sheet = "data_adj2")
+
+# Convert all columns to numeric using base R
+covar[, -ncol(covar)] <- lapply(covar[, -ncol(covar)], as.numeric)
+covar_MH <- covar[,c(2:14)]
+covar <- covar[,-c(2:14)]
+
+names(covar) <- names(covar) |>
+  (\(x) gsub(" ", "_", x, fixed = TRUE))() |>
+  (\(x) gsub("'", "_", x, fixed = TRUE))() |>
+  (\(x) gsub(",", "_", x, fixed = TRUE))() |>
+  (\(x) gsub("-", "_", x, fixed = TRUE))() |>
+  (\(x) gsub("–", "_", x, fixed = TRUE))() |>
+  (\(x) gsub("—", "_", x, fixed = TRUE))() |>
+  (\(x) gsub("/", "_", x, fixed = TRUE))() |>
+  (\(x) gsub("\\.+", "_", x))() |>
+  (\(x) gsub("[\\(\\)]", "", x))() |>
+  (\(x) gsub("__+", "_", x))() |>
+  (\(x) gsub("_$", "", x))() |>
+  (\(x) gsub("^_", "", x))()
+
+
+covar_original <- bind_cols(covar, covar_MH, FH_yesno)
+
+# ----add to metals----
+tox_air_covar <- tox_air_lr %>% 
+  left_join(covar, by = "FFID")
+
+tox_wipe_covar <- tox_wipe_lr %>% 
+  left_join(covar, by = "FFID")
+```
+## Table 2
+### two sample t-test
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+dat <- covar_original 
+outcomes <- c("CESD", "ASI", "FAST", "PCL")
+
+# Helper 1: Welch two-sample t-test for one binary indicator (1 vs 0)
+ttest_yes_no <- function(data, indicator, outcome){
+  d <- data %>%
+    filter(!is.na(.data[[indicator]]), !is.na(.data[[outcome]])) %>%
+    filter(.data[[indicator]] %in% c(0,1))
+
+  n0 <- sum(d[[indicator]] == 0)
+  n1 <- sum(d[[indicator]] == 1)
+
+  if (n0 < 2 || n1 < 2) {
+    return(tibble(
+      ref = "0", compare = indicator, outcome = outcome,
+      n_ref = n0, n_cat = n1,
+      mean_ref = NA_real_, mean_cat = NA_real_,
+      diff_cat_minus_ref = NA_real_, t = NA_real_, df = NA_real_, p = NA_real_
+    ))
+  }
+
+  tt <- t.test(d[[outcome]] ~ d[[indicator]], var.equal = FALSE)
+
+  mean0 <- mean(d[[outcome]][d[[indicator]] == 0])
+  mean1 <- mean(d[[outcome]][d[[indicator]] == 1])
+
+  tibble(
+    ref = "0", compare = indicator, outcome = outcome,
+    n_ref = n0, n_cat = n1,
+    mean_ref = mean0, mean_cat = mean1,
+    diff_cat_minus_ref = mean1 - mean0,
+    t = unname(tt$statistic),
+    df = unname(tt$parameter),
+    p = tt$p.value
+  )
+}
+
+# Helper 2: category vs reference using two binary columns (subset to ref==1 OR cat==1)
+# Includes a strict mutual-exclusivity filter: drops rows where ref==1 AND cat==1
+ttest_cat_vs_ref <- function(data, ref_col, cat_col, outcome){
+  d <- data %>%
+    filter(!is.na(.data[[ref_col]]), !is.na(.data[[cat_col]]), !is.na(.data[[outcome]])) %>%
+    filter(.data[[ref_col]] %in% c(0,1), .data[[cat_col]] %in% c(0,1)) %>%
+    filter(.data[[ref_col]] == 1 | .data[[cat_col]] == 1) %>%
+    filter(!(.data[[ref_col]] == 1 & .data[[cat_col]] == 1)) %>%   # drop overlaps
+    mutate(group = if_else(.data[[cat_col]] == 1, cat_col, ref_col)) %>%
+    filter(group %in% c(ref_col, cat_col))
+
+  n_ref <- sum(d$group == ref_col)
+  n_cat <- sum(d$group == cat_col)
+
+  if (n_ref < 2 || n_cat < 2) {
+    return(tibble(
+      ref = ref_col, compare = cat_col, outcome = outcome,
+      n_ref = n_ref, n_cat = n_cat,
+      mean_ref = NA_real_, mean_cat = NA_real_,
+      diff_cat_minus_ref = NA_real_, t = NA_real_, df = NA_real_, p = NA_real_
+    ))
+  }
+
+  d$group <- factor(d$group, levels = c(ref_col, cat_col))
+  tt <- t.test(d[[outcome]] ~ d$group, var.equal = FALSE)
+
+  tibble(
+    ref = ref_col, compare = cat_col, outcome = outcome,
+    n_ref = n_ref, n_cat = n_cat,
+    mean_ref = mean(d[[outcome]][d$group == ref_col]),
+    mean_cat = mean(d[[outcome]][d$group == cat_col]),
+    diff_cat_minus_ref = mean_cat - mean_ref,
+    t = unname(tt$statistic),
+    df = unname(tt$parameter),
+    p = tt$p.value
+  )
+}
+
+# ----- 1) Tobacco: Non_user as reference (mutually exclusive) -----
+tobacco_ref <- "Non_user"
+tobacco_cats <- c("Current_User", "Former_user")
+
+res_tobacco <- expand_grid(cat = tobacco_cats, outcome = outcomes) %>%
+  pmap_dfr(\(cat, outcome) ttest_cat_vs_ref(dat, tobacco_ref, cat, outcome)) %>%
+  mutate(big_group = "Tobacco User")
+
+# ----- 2) Alcohol: <1_times_per_month as reference (mutually exclusive) -----
+alcohol_ref <- "Consume_alcohol_<1_times_per_month"
+alcohol_cats <- c("Consume_alcohol_monthly",
+                  "Consume_alcohol_weekly",
+                  "Consume_alcohol_2_3_times_per_week",
+                  "Consume_alcohol_>4_times_per_week")
+
+res_alcohol <- expand_grid(cat = alcohol_cats, outcome = outcomes) %>%
+  pmap_dfr(\(cat, outcome) ttest_cat_vs_ref(dat, alcohol_ref, cat, outcome)) %>%
+  mutate(big_group = "Consume Alcohol")
+
+# ----- 3) Trauma on duty: Yes vs No for each item (1 vs 0) -----
+duty_items <- c("Fire_related_incidents",
+                "Natural_disasters_on_duty",
+                "Sudden_death_or_loss_of_a_peer_firefighters",
+                "Serious_accidents_or_injuries_on_duty",
+                "Serious_illness_or_medical_procedures_on_duty")
+
+res_duty <- expand_grid(indicator = duty_items, outcome = outcomes) %>%
+  pmap_dfr(\(indicator, outcome) ttest_yes_no(dat, indicator, outcome)) %>%
+  mutate(big_group = "Traumatic Events On Duty")
+
+# ----- 4) Trauma childhood: Yes vs No for each item (1 vs 0) -----
+child_items <- c("Sudden_death_or_loss_of_a_loved_one",
+                 "Natural_disasters_Childhood",
+                 "Physical_or_emotional_abuse",
+                 "Serious_accidents_or_injuries_in_Childhood",
+                 "Bullying_or_peer_victimization",
+                 "Serious_illness_or_medical_procedures_in_childhood")
+
+res_child <- expand_grid(indicator = child_items, outcome = outcomes) %>%
+  pmap_dfr(\(indicator, outcome) ttest_yes_no(dat, indicator, outcome)) %>%
+  mutate(big_group = "Traumatic Events During Childhood")
+
+# ----- 5) Family history: Yes vs No for each item (1 vs 0) -----
+fh_items <- c("FH_PTSD", "FH_DEPRESSION", "FH_ANXIETY", "FH_STRESS", "FH_other","FH_yes","FH_no")
+
+res_fh <- expand_grid(indicator = fh_items, outcome = outcomes) %>%
+  pmap_dfr(\(indicator, outcome) ttest_yes_no(dat, indicator, outcome)) %>%
+  mutate(big_group = "Family History of Mental Health Issues")
+
+# ----- Combine (now all parts share the same schema, so no NA columns) -----
+all_results <- bind_rows(
+  res_tobacco,
+  res_alcohol,
+  res_duty,
+  res_child,
+  res_fh
+)
+
+all_results <- all_results %>%
+  group_by(big_group) %>%
+  mutate(p_BH = p.adjust(p, method = "BH")) %>%
+  ungroup()
+
+View(all_results)
+```
+
+### Hotelling's t-test
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+dat <- covar_original
+outcomes <- c("CESD", "ASI", "FAST", "PCL")
+
+# Hotelling's two-sample T^2 (4 outcomes jointly)
+
+hotelling_two_sample <- function(data, group_vec, outcome_cols){
+  d <- data %>%
+    dplyr::select(all_of(outcome_cols)) %>%
+    mutate(.g = group_vec) %>%
+    filter(!is.na(.g)) %>%
+    filter(.g %in% c(0,1)) %>%
+    filter(complete.cases(.))   # require all 4 outcomes observed
+
+  n0 <- sum(d$.g == 0)
+  n1 <- sum(d$.g == 1)
+  p <- length(outcome_cols)
+
+  # Need enough sample size and invertible pooled covariance
+  if (n0 <= p || n1 <= p) {
+    return(tibble(
+      n0 = n0, n1 = n1, p = p,
+      T2 = NA_real_, F = NA_real_, df1 = NA_real_, df2 = NA_real_, p_value = NA_real_
+    ))
+  }
+
+  X0 <- as.matrix(d[d$.g == 0, outcome_cols, drop = FALSE])
+  X1 <- as.matrix(d[d$.g == 1, outcome_cols, drop = FALSE])
+
+  m0 <- colMeans(X0); m1 <- colMeans(X1)
+  S0 <- stats::cov(X0); S1 <- stats::cov(X1)
+
+  Sp <- ((n0 - 1) * S0 + (n1 - 1) * S1) / (n0 + n1 - 2)
+
+  # If Sp is singular, cannot compute standard Hotelling T^2
+  if (qr(Sp)$rank < p) {
+    return(tibble(
+      n0 = n0, n1 = n1, p = p,
+      T2 = NA_real_, F = NA_real_, df1 = NA_real_, df2 = NA_real_, p_value = NA_real_
+    ))
+  }
+
+  dbar <- matrix(m1 - m0, ncol = 1)
+
+  T2 <- as.numeric((n0 * n1) / (n0 + n1) * t(dbar) %*% solve(Sp) %*% dbar)
+
+  df1 <- p
+  df2 <- n0 + n1 - p - 1
+  Fstat <- as.numeric((df2 * T2) / (df1 * (n0 + n1 - 2)))
+
+  pval <- stats::pf(Fstat, df1 = df1, df2 = df2, lower.tail = FALSE)
+
+  tibble(
+    n0 = n0, n1 = n1, p = p,
+    T2 = T2, F = Fstat, df1 = df1, df2 = df2, p_value = pval
+  )
+}
+
+hotelling_yes_no <- function(data, indicator, outcome_cols){
+  g <- data[[indicator]]
+  res <- hotelling_two_sample(data, g, outcome_cols)
+  res %>%
+    mutate(ref = "0", compare = indicator,
+           big_group = NA_character_)
+}
+
+hotelling_cat_vs_ref <- function(data, ref_col, cat_col, outcome_cols){
+  dsub <- data %>%
+    filter(!is.na(.data[[ref_col]]), !is.na(.data[[cat_col]])) %>%
+    filter(.data[[ref_col]] %in% c(0,1), .data[[cat_col]] %in% c(0,1)) %>%
+    filter(.data[[ref_col]] == 1 | .data[[cat_col]] == 1) %>%
+    filter(!(.data[[ref_col]] == 1 & .data[[cat_col]] == 1)) %>%
+    mutate(.g = if_else(.data[[cat_col]] == 1, 1L, 0L))  # 0=ref, 1=cat
+
+  res <- hotelling_two_sample(dsub, dsub$.g, outcome_cols)
+  res %>%
+    mutate(ref = ref_col, compare = cat_col,
+           big_group = NA_character_)
+}
+
+
+# 1) Tobacco: Non_user as reference
+tobacco_ref <- "Non_user"
+tobacco_cats <- c("Current_User", "Former_user")
+
+res_hot_tobacco <- expand_grid(cat = tobacco_cats) %>%
+  pmap_dfr(\(cat) hotelling_cat_vs_ref(dat, tobacco_ref, cat, outcomes)) %>%
+  mutate(big_group = "Tobacco User")
+
+# 2) Alcohol: <1_times_per_month as reference
+alcohol_ref <- "Consume_alcohol_<1_times_per_month"
+alcohol_cats <- c("Consume_alcohol_monthly",
+                  "Consume_alcohol_weekly",
+                  "Consume_alcohol_2_3_times_per_week",
+                  "Consume_alcohol_>4_times_per_week")
+
+res_hot_alcohol <- expand_grid(cat = alcohol_cats) %>%
+  pmap_dfr(\(cat) hotelling_cat_vs_ref(dat, alcohol_ref, cat, outcomes)) %>%
+  mutate(big_group = "Consume Alcohol")
+
+# 3) Trauma on duty: Yes vs No
+duty_items <- c("Fire_related_incidents",
+                "Natural_disasters_on_duty",
+                "Sudden_death_or_loss_of_a_peer_firefighters",
+                "Serious_accidents_or_injuries_on_duty",
+                "Serious_illness_or_medical_procedures_on_duty")
+
+res_hot_duty <- expand_grid(indicator = duty_items) %>%
+  pmap_dfr(\(indicator) hotelling_yes_no(dat, indicator, outcomes) %>% dplyr::select(-big_group)) %>%
+  mutate(big_group = "Traumatic Events On Duty")
+
+# 4) Trauma childhood: Yes vs No
+child_items <- c("Sudden_death_or_loss_of_a_loved_one",
+                 "Natural_disasters_Childhood",
+                 "Physical_or_emotional_abuse",
+                 "Serious_accidents_or_injuries_in_Childhood",
+                 "Bullying_or_peer_victimization",
+                 "Serious_illness_or_medical_procedures_in_childhood")
+
+res_hot_child <- expand_grid(indicator = child_items) %>%
+  pmap_dfr(\(indicator) hotelling_yes_no(dat, indicator, outcomes) %>% dplyr::select(-big_group)) %>%
+  mutate(big_group = "Traumatic Events During Childhood")
+
+# 5) Family history: Yes vs No
+fh_items <- c("FH_PTSD", "FH_DEPRESSION", "FH_ANXIETY", "FH_STRESS", "FH_other","FH_yes","FH_no")
+
+res_hot_fh <- expand_grid(indicator = fh_items) %>%
+  pmap_dfr(\(indicator) hotelling_yes_no(dat, indicator, outcomes) %>% dplyr::select(-big_group)) %>%
+  mutate(big_group = "Family History of Mental Health Issues")
+
+hotelling_results <- bind_rows(
+  res_hot_tobacco,
+  res_hot_alcohol,
+  res_hot_duty,
+  res_hot_child,
+  res_hot_fh
+) %>%
+  group_by(big_group) %>%
+  mutate(p_BH = p.adjust(p_value, method = "BH")) %>%
+  ungroup() %>%
+  arrange(big_group, p_value)
+
+View(hotelling_results)
+```
+
+### table 2 add SD 
+```{r}
+library(dplyr)
+library(tidyr)
+library(purrr)
+
+dat <- covar_original
+outcomes <- c("CESD", "ASI", "FAST", "PCL")
+
+# Set this to match your Table 2 header if needed (e.g., 35)
+N_total <- nrow(dat)
+
+fmt_mean_sd <- function(x, digits = 1){
+  m <- mean(x, na.rm = TRUE)
+  s <- sd(x, na.rm = TRUE)
+  if (is.nan(m) || is.na(m)) return(NA_character_)
+  paste0(
+    formatC(m, format = "f", digits = digits),
+    " (", formatC(s, format = "f", digits = digits), ")"
+  )
+}
+
+summarise_row <- function(data, filter_col, label){
+  dsub <- data %>% filter(.data[[filter_col]] == 1)
+
+  N <- nrow(dsub)
+  pct <- 100 * N / N_total
+
+  tibble(
+    Category = label,
+    `N (%)` = sprintf("%d (%.0f%%)", N, pct),
+    CESD = fmt_mean_sd(dsub$CESD),
+    ASI  = fmt_mean_sd(dsub$ASI),
+    FAST = fmt_mean_sd(dsub$FAST),
+    PCL5 = fmt_mean_sd(dsub$PCL)
+  )
+}
+
+# Tobacco (mutually exclusive)
+tobacco_rows <- tribble(
+  ~col,          ~label,
+  "Non_user",    "Non-user",
+  "Current_User","Current user",
+  "Former_user", "Former user"
+)
+
+# Alcohol (mutually exclusive)
+alcohol_rows <- tribble(
+  ~col,                               ~label,
+  "Consume_alcohol_<1_times_per_month","<1 Time Per Month",
+  "Consume_alcohol_monthly",          "Monthly",
+  "Consume_alcohol_weekly",           "Weekly",
+  "Consume_alcohol_2_3_times_per_week","2–3 Times Per Week",
+  "Consume_alcohol_>4_times_per_week",">4 Times Per Week"
+)
+
+# Trauma (overlap allowed): keep the "Yes (1)" rows only (as your prior table did)
+duty_rows <- tribble(
+  ~col, ~label,
+  "Fire_related_incidents", "Fire-related incidents",
+  "Natural_disasters_on_duty", "Natural disasters",
+  "Sudden_death_or_loss_of_a_peer_firefighters", "Sudden death/loss of a peer firefighter",
+  "Serious_accidents_or_injuries_on_duty", "Serious accidents/injuries",
+  "Serious_illness_or_medical_procedures_on_duty", "Serious illness/medical procedures"
+)
+
+child_rows <- tribble(
+  ~col, ~label,
+  "Sudden_death_or_loss_of_a_loved_one", "Sudden death/loss of a loved one",
+  "Natural_disasters_Childhood", "Natural disasters",
+  "Physical_or_emotional_abuse", "Physical/emotional abuse",
+  "Serious_accidents_or_injuries_in_Childhood", "Serious accidents/injuries",
+  "Bullying_or_peer_victimization", "Bullying/peer victimization",
+  "Serious_illness_or_medical_procedures_in_childhood", "Serious illness/medical procedures"
+)
+
+fh_rows <- tribble(
+  ~col, ~label,
+  "FH_PTSD", "PTSD",
+  "FH_DEPRESSION", "Depression",
+  "FH_ANXIETY", "Anxiety",
+  "FH_STRESS", "Stress",
+  "FH_other", "Other",
+  "FH_yes", "Family History Issues",
+  "FH_no", "No Family History"
+)
+
+# -------------------------
+# Build table2_like with mean (SD)
+# -------------------------
+table2_like <- bind_rows(
+  tobacco_rows %>% pmap_dfr(\(col, label) summarise_row(dat, col, label)),
+  alcohol_rows %>% pmap_dfr(\(col, label) summarise_row(dat, col, label)),
+  duty_rows    %>% pmap_dfr(\(col, label) summarise_row(dat, col, label)),
+  child_rows   %>% pmap_dfr(\(col, label) summarise_row(dat, col, label)),
+  fh_rows      %>% pmap_dfr(\(col, label) summarise_row(dat, col, label))
+)
+
+View(table2_like)
+write_xlsx(table2_like, "table2_like.xlsx")
+```
+
+
+## air selection threshold 70%
+```{r}
+dep_vars <- c("CESD", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL", "FAST")
+predictor_cols <- c(40:ncol(tox_air_covar))
+
+lasso_selected_vars_air <- list()
+lasso_final_models <- list()
+
+N_BOOT <- 100
+SELECTION_THRESHOLD <- 0.70   # >70% frequency
+
+set.seed(123)   # GLOBAL seed for full reproducibility
+
+for (dep in dep_vars) {
+  
+  # 1. Prepare dataset
+  dat <- tox_air_covar[, c(dep, names(tox_air_covar)[predictor_cols])]
+  dat <- dat[complete.cases(dat), ]
+  
+  y_full <- dat[[dep]]
+  X_full <- as.matrix(dat[, -1])
+  
+  p <- ncol(X_full)
+  var_names <- colnames(X_full)
+  
+  selection_count <- setNames(rep(0, p), var_names)
+  
+  # 2. Stable bootstrap LASSO
+  for (b in 1:N_BOOT) {
+    
+    set.seed(123 + b)  # Deterministic bootstrap sample sequence
+    
+    # Resample
+    idx <- sample(1:nrow(dat), replace = TRUE)
+    y <- y_full[idx]
+    X <- X_full[idx, ]
+    
+    # FIXED CV folds for this bootstrap iteration
+    set.seed(999 + b)
+    foldid <- sample(rep(1:10, length.out = nrow(X)))
+    
+    # CV LASSO using lambda.min
+    cvfit <- cv.glmnet(
+      x = X,
+      y = y,
+      alpha = 0.5,
+      nfolds = 10,
+      foldid = foldid,
+      grouped = FALSE
+    )
+    
+    lam <- cvfit$lambda.min
+    coef_lasso <- coef(cvfit, s = lam)
+    
+    selected <- rownames(coef_lasso)[coef_lasso[, 1] != 0]
+    selected <- selected[selected != "(Intercept)"]
+    
+    selection_count[selected] <- selection_count[selected] + 1
+  }
+  
+  # 3. Selection frequency
+  selection_freq <- selection_count / N_BOOT
+  
+  # 4. Keep variables selected ≥ 70%
+  selected_vars <- names(selection_freq[selection_freq >= SELECTION_THRESHOLD])
+  
+  lasso_selected_vars_air[[dep]] <- selected_vars
+  
+}
+
+lasso_selected_vars_air
+```
+
+## wipe selection threshold 70%
+```{r}
+dep_vars <- c("CESD", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL", "FAST")
+predictor_cols <- c(40:ncol(tox_wipe_covar))
+
+lasso_selected_vars_wipe <- list()
+lasso_final_models <- list()
+
+N_BOOT <- 100
+SELECTION_THRESHOLD <- 0.70   # >70% frequency
+
+set.seed(123)   
+
+for (dep in dep_vars) {
+  
+  # 1. Prepare dataset
+  dat <- tox_wipe_covar[, c(dep, names(tox_wipe_covar)[predictor_cols])]
+  dat <- dat[complete.cases(dat), ]
+  
+  y_full <- dat[[dep]]
+  X_full <- as.matrix(dat[, -1])
+  
+  p <- ncol(X_full)
+  var_names <- colnames(X_full)
+  
+  selection_count <- setNames(rep(0, p), var_names)
+  
+  # 2. Stable bootstrap LASSO
+  for (b in 1:N_BOOT) {
+    
+    set.seed(123 + b)  # Deterministic bootstrap sample sequence
+    
+    # Resample
+    idx <- sample(1:nrow(dat), replace = TRUE)
+    y <- y_full[idx]
+    X <- X_full[idx, ]
+    
+    # FIXED CV folds for this bootstrap iteration
+    set.seed(999 + b)
+    foldid <- sample(rep(1:10, length.out = nrow(X)))
+    
+    # CV LASSO using lambda.min
+    cvfit <- cv.glmnet(
+      x = X,
+      y = y,
+      alpha = 0.5,
+      nfolds = 10,
+      foldid = foldid,
+      grouped = FALSE
+    )
+    
+    lam <- cvfit$lambda.min
+    coef_lasso <- coef(cvfit, s = lam)
+    
+    selected <- rownames(coef_lasso)[coef_lasso[, 1] != 0]
+    selected <- selected[selected != "(Intercept)"]
+    
+    selection_count[selected] <- selection_count[selected] + 1
+  }
+  
+  # 3. Selection frequency
+  selection_freq <- selection_count / N_BOOT
+  
+  # 4. Keep variables selected ≥ 70%
+  selected_vars <- names(selection_freq[selection_freq >= SELECTION_THRESHOLD])
+  
+  lasso_selected_vars_wipe[[dep]] <- selected_vars
+  
+  # 5. Final OLS
+  if (length(selected_vars) > 0) {
+    form <- as.formula(paste(dep, "~", paste(selected_vars, collapse = " + ")))
+    lasso_final_models[[dep]] <- lm(form, data = dat)
+  } else {
+    lasso_final_models[[dep]] <- NULL
+  }
+}
+
+lasso_selected_vars_wipe
+
+```
+
+## figure to present
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+make_select_df <- function(sel_list, dataset_label) {
+  tibble::enframe(sel_list, name = "Outcome", value = "Predictor") %>%
+    tidyr::unnest_longer(Predictor) %>%
+    mutate(
+      Dataset  = dataset_label,
+      Selected = 1L
+    )
+}
+
+# Long format: only selected pairs
+sel_long <- bind_rows(
+  make_select_df(lasso_selected_vars_air,  "Air"),
+  make_select_df(lasso_selected_vars_wipe, "Wipe")
+)
+
+# Outcome order
+outcome_order <- c("CESD", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL", "FAST")
+sel_long <- sel_long %>%
+  mutate(Outcome = factor(Outcome, levels = outcome_order))
+
+# All covariates across both datasets (y-axis should include everything)
+all_covars <- sel_long %>%
+  distinct(Predictor) %>%
+  pull(Predictor)
+
+# Full grid so every (Outcome, Covariate, Dataset) exists
+grid_full <- tidyr::expand_grid(
+  Dataset   = c("Air", "Wipe"),
+  Outcome   = factor(outcome_order, levels = outcome_order),
+  Predictor = all_covars
+) %>%
+  left_join(
+    sel_long %>% dplyr::select(Dataset, Outcome, Predictor, Selected),
+    by = c("Dataset", "Outcome", "Predictor")
+  ) %>%
+  mutate(Selected = ifelse(is.na(Selected), 0L, Selected))
+
+# Order covariates by how often they were selected overall (Air+Wipe)
+pred_order <- grid_full %>%
+  group_by(Predictor) %>%
+  summarise(n_selected = sum(Selected), .groups = "drop") %>%
+  arrange(desc(n_selected), Predictor) %>%
+  pull(Predictor)
+
+grid_full <- grid_full %>%
+  mutate(
+    Predictor = factor(Predictor, levels = pred_order),
+    Predictor_label = gsub("_", " ", as.character(Predictor))
+  )
+
+fix_label <- function(x) {
+  lab <- gsub("_", " ", x)
+  lab <- gsub("\\bAvg\\b", "Average", lab)          # Avg -> Average
+  lab <- gsub("\\b2 3\\b", "2 to 3", lab)           # 2 3 -> 2 to 3
+  lab <- gsub("\\binstructor\\b", "instructor rank", lab)  # instructor -> instructor rank
+  lab
+}
+
+grid_full <- grid_full %>%
+  mutate(Predictor_label = fix_label(as.character(Predictor)))
+
+# Then in ggplot, use Predictor_label on y
+plot_pts <- grid_full %>%
+  filter(Selected == 1L) %>%
+  mutate(
+    x_num = as.numeric(Outcome),
+    x_jit = ifelse(Dataset == "Air", x_num + 0.14, x_num - 0.14)
+  )
+
+ggplot(plot_pts, aes(x = x_jit, y = Predictor_label, color = Dataset)) +
+  geom_point(size = 2.6) +
+  scale_color_manual(values = c("Air" = "red", "Wipe" = "blue")) +
+  scale_x_continuous(breaks = seq_along(outcome_order), labels = outcome_order) +
+  labs(x = "Outcome", y = "Covariate",
+       title = "Covariates selected by LASSO (Air vs Wipe)") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        axis.text.x = element_text(angle = 0, hjust = 0.5))
+```
+
+
+
+
+# PCA 
+## for air
+```{r}
+# ---- PCA for air exposures ----
+# get the tox names
+air_vars <- names(tox_air_lr)[grepl("_air$", names(tox_air_lr))]
+
+# PCA
+pca_air <- prcomp(tox_air_lr[, air_vars], center = TRUE, scale. = TRUE)
+
+summary(pca_air)
+
+# View the loadings of the first two principal components sorted by absolute value
+loadings_air <- abs(pca_air$rotation[, 1:2])  # PC1 & PC2
+
+# Select the top 5 variables with the largest loadings
+top_pc1_air <- sort(loadings_air[, 1], decreasing = TRUE)[1:5]
+top_pc2_air <- sort(loadings_air[, 2], decreasing = TRUE)[1:5]
+
+cat("Top 5 chemicals in PC1 (air):\n")
+print(names(top_pc1_air))
+
+cat("Top 5 chemicals in PC2 (air):\n")
+print(names(top_pc2_air))
+
+```
+### Find the loadings of each element
+```{r}
+## Extract loadings for PC1 and PC2
+load_mat <- pca_air$rotation[, 1:2]
+
+## Build table
+pc_table <- data.frame(
+  element   = rownames(load_mat),
+
+  ## PC1
+  PC1_loading     = load_mat[, 1],
+  PC1_direction   = ifelse(load_mat[, 1] > 0, "positive", "-"),
+
+  ## PC2
+  PC2_loading     = load_mat[, 2],
+  PC2_direction   = ifelse(load_mat[, 2] > 0, "positive", "-")
+)
+
+## Optional: sort by importance in PC1 or PC2
+pc_table_PC1_sorted <- pc_table[order(abs(pc_table$PC1_loading), decreasing = TRUE), ]
+pc_table_PC2_sorted <- pc_table[order(abs(pc_table$PC2_loading), decreasing = TRUE), ]
+
+write_xlsx(pc_table_PC2_sorted, "pc_table_PC2_sorted.xlsx")
+
+
+```
+
+
+## for wipe
+```{r}
+# ---- PCA for wipe exposures ----
+# get the tox names
+wipe_vars <- names(tox_wipe_lr)[grepl("_wipe$", names(tox_wipe_lr))]
+
+# PCA
+pca_wipe <- prcomp(tox_wipe_lr[, wipe_vars], center = TRUE, scale. = TRUE)
+
+summary(pca_wipe)
+
+# View the loadings of the first two principal components sorted by absolute value
+loadings_wipe <- abs(pca_wipe$rotation[, 1:2])  # PC1 & PC2
+
+# Select the top 5 variables with the largest loadings
+top_pc1_wipe <- sort(loadings_wipe[, 1], decreasing = TRUE)[1:5]
+top_pc2_wipe <- sort(loadings_wipe[, 2], decreasing = TRUE)[1:5]
+
+cat("Top 5 chemicals in PC1 (wipe):\n")
+print(names(top_pc1_wipe))
+
+cat("Top 5 chemicals in PC2 (wipe):\n")
+print(names(top_pc2_wipe))
+
+```
+
+### Find the loadings of each element
+```{r}
+## Extract loadings for PC1 and PC2
+load_mat <- pca_wipe$rotation[, 1:2]
+
+## Build table
+pc_table <- data.frame(
+  element   = rownames(load_mat),
+
+  ## PC1
+  PC1_loading     = load_mat[, 1],
+  PC1_direction   = ifelse(load_mat[, 1] > 0, "positive", "-"),
+
+  ## PC2
+  PC2_loading     = load_mat[, 2],
+  PC2_direction   = ifelse(load_mat[, 2] > 0, "positive", "-")
+)
+
+## Optional: sort by importance in PC1 or PC2
+pc_table_PC1_sorted <- pc_table[order(abs(pc_table$PC1_loading), decreasing = TRUE), ]
+pc_table_PC2_sorted <- pc_table[order(abs(pc_table$PC2_loading), decreasing = TRUE), ]
+
+write_xlsx(pc_table_PC1_sorted, "pc_table_PC1_sorted.xlsx")
+```
+
+## bar plot for loadings
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+df <- tibble::tribble(
+  ~element,  ~PC_loading,
+  "Mn_air",  0.473026701,
+  "Ba_air",  0.321364732,
+  "Cu_air",  0.271572817,
+  "Ni_air",  0.261097843,
+  "Zn_air",  0.191147683,
+  "Cr_air",  0.153386926,
+  "P_air",   0.150955406,
+  "Fe_air",  0.141033716,
+  "Sr_air",  0.126489187,
+  "Co_air",  0.061096809,
+  "V_air",   0.024007464,
+  "Mo_air",  0.010105981
+)
+
+plot_df <- df %>%
+  arrange(desc(PC_loading)) %>%
+  mutate(element = factor(element, levels = element))
+
+ggplot(plot_df, aes(x = element, y = PC_loading)) +
+  geom_col() +
+  geom_text(aes(label = sprintf("%.3f", PC_loading)), vjust = -0.35, size = 4) +
+  labs(x = "Toxicant", y = "PC loading") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 0.5))
+```
+
+
+# PCR + covar
+## air
+```{r}
+mh_domains <- c("CESD", "FAST", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL")
+
+# Add PC1 and PC2 to tox_air_covar
+tox_air_covar$PC1_air <- pca_air$x[, 1]
+tox_air_covar$PC2_air <- pca_air$x[, 2]
+
+linreg_results_air <- list()
+
+for (dep in mh_domains) {
+  
+  cat("Running AIR linear regression for:", dep, "\n")
+  
+  # Covariates selected by LASSO
+  covars <- lasso_selected_vars_air[[dep]]
+  covars <- covars[covars != dep]   # safety check
+  
+  # Build regression formula
+  if (length(covars) == 0) {
+    formula_str <- paste(dep, "~ PC1_air + PC2_air")
+  } else {
+    formula_str <- paste(dep, "~ PC1_air + PC2_air +", paste(covars, collapse = " + "))
+  }
+  
+  model_lin <- lm(as.formula(formula_str), data = tox_air_covar)
+  linreg_results_air[[dep]] <- model_lin
+}
+
+
+```
+
+## wipe
+```{r}
+# Add PC1 and PC2 to tox_wipe_covar
+tox_wipe_covar$PC1_wipe <- pca_wipe$x[, 1]
+tox_wipe_covar$PC2_wipe <- pca_wipe$x[, 2]
+
+linreg_results_wipe <- list()
+
+for (dep in mh_domains) {
+  
+  cat("Running WIPE linear regression for:", dep, "\n")
+  
+  covars <- lasso_selected_vars_wipe[[dep]]
+  covars <- covars[covars != dep]
+
+  # Build regression formula
+  if (length(covars) == 0) {
+    formula_str <- paste(dep, "~ PC1_wipe + PC2_wipe")
+  } else {
+    formula_str <- paste(dep, "~ PC1_wipe + PC2_wipe +", paste(covars, collapse = " + "))
+  }
+  
+  model_lin <- lm(as.formula(formula_str), data = tox_wipe_covar)
+  linreg_results_wipe[[dep]] <- model_lin
+}
+
+
+
+```
+
+## create summary tables: extract_significant
+```{r}
+extract_significant <- function(model, model_name) {
+  
+  # summary() coefficients
+  coefs <- as.data.frame(summary(model)$coefficients)
+  coefs$Predictor <- rownames(coefs)
+  rownames(coefs) <- NULL
+  
+  coefs <- coefs %>%
+    dplyr::rename(
+      Beta = Estimate,
+      p_value  = `Pr(>|t|)`
+    ) %>%
+    dplyr::select(Predictor, Beta, p_value)
+  
+  # Remove intercept
+  coefs <- coefs[coefs$Predictor != "(Intercept)", ]
+  
+  # 95% CI
+  ci <- as.data.frame(confint(model))
+  ci$Predictor <- rownames(ci)
+  rownames(ci) <- NULL
+  colnames(ci)[1:2] <- c("CI_lower", "CI_upper")
+  
+  coefs <- merge(coefs, ci, by = "Predictor", all.x = TRUE)
+  
+  # Significance
+  coefs$Significance <- cut(
+    coefs$p_value,
+    breaks = c(-Inf, 0.001, 0.01, 0.05, Inf),
+    labels = c("***", "**", "*", " ")
+  )
+  
+  # Keep only significant predictors
+  coefs <- coefs[coefs$p_value < 0.05, ]
+  
+  if (nrow(coefs) == 0) return(NULL)
+  
+  coefs$Model <- model_name
+  
+  coefs
+}
+
+
+summary_air <- do.call(
+  rbind,
+  lapply(names(linreg_results_air), function(dep) {
+    extract_significant(linreg_results_air[[dep]], dep)
+  })
+)
+
+View(summary_air)
+
+summary_wipe <- do.call(
+  rbind,
+  lapply(names(linreg_results_wipe), function(dep) {
+    extract_significant(linreg_results_wipe[[dep]], dep)
+  })
+)
+
+View(summary_wipe)
+
+write_xlsx(summary_air, "Table 3 air_PCR R output.xlsx")
+write_xlsx(summary_wipe, "Table 3 wipe_PCR R output.xlsx")
+```
+
+# LR: tox in PCs + covar
+## air (only PC1 or PC2)
+```{r}
+# AIR
+chem_pc1_air <- names(top_pc1_air)
+chem_pc2_air <- names(top_pc2_air)
+chem_air <- c(chem_pc1_air, chem_pc2_air)
+
+linreg_results_air_chem <- list()
+
+for (dep in mh_domains) {
+  
+  covars <- lasso_selected_vars_air[[dep]]
+  covars <- covars[covars != dep]
+  
+  ## ---- PC1 chemicals only ----
+  formula_pc1 <- paste(
+    dep, "~",
+    paste(c(chem_pc1_air, covars), collapse = " + ")
+  )
+  
+  model_pc1 <- lm(as.formula(formula_pc1), data = tox_air_covar)
+  linreg_results_air_chem[[paste0(dep, "_PC1chem")]] <- model_pc1
+  
+  ## ---- PC2 chemicals only ----
+  formula_pc2 <- paste(
+    dep, "~",
+    paste(c(chem_pc2_air, covars), collapse = " + ")
+  )
+  
+  model_pc2 <- lm(as.formula(formula_pc2), data = tox_air_covar)
+  linreg_results_air_chem[[paste0(dep, "_PC2chem")]] <- model_pc2
+}
+
+summary_air_chem <- do.call(
+  rbind,
+  lapply(names(linreg_results_air_chem), function(dep) {
+    extract_significant(linreg_results_air_chem[[dep]], dep)
+  })
+)
+
+View(summary_air_chem)
+
+```
+
+## wipe (only PC1 or PC2)
+```{r}
+# WIPE
+chem_pc1_wipe <- names(top_pc1_wipe)
+chem_pc2_wipe <- names(top_pc2_wipe)
+chem_wipe <- c(chem_pc1_wipe, chem_pc2_wipe)
+
+linreg_results_wipe_chem <- list()
+
+for (dep in mh_domains) {
+  
+  covars <- lasso_selected_vars_wipe[[dep]]
+  covars <- covars[covars != dep]
+  
+  ## ---- PC1 chemicals only ----
+  formula_pc1 <- paste(
+    dep, "~",
+    paste(c(chem_pc1_wipe, covars), collapse = " + ")
+  )
+  
+  model_pc1 <- lm(as.formula(formula_pc1), data = tox_wipe_covar)
+  linreg_results_wipe_chem[[paste0(dep, "_PC1chem")]] <- model_pc1
+  
+  ## ---- PC2 chemicals only ----
+  formula_pc2 <- paste(
+    dep, "~",
+    paste(c(chem_pc2_wipe, covars), collapse = " + ")
+  )
+  
+  model_pc2 <- lm(as.formula(formula_pc2), data = tox_wipe_covar)
+  linreg_results_wipe_chem[[paste0(dep, "_PC2chem")]] <- model_pc2
+}
+
+
+summary_wipe_chem <- do.call(
+  rbind,
+  lapply(names(linreg_results_wipe_chem), function(dep) {
+    extract_significant(linreg_results_wipe_chem[[dep]], dep)
+  })
+)
+
+View(summary_wipe_chem)
+
+write_xlsx(summary_air_chem, "Table 3 air_LR_LASSO R output.xlsx")
+write_xlsx(summary_wipe_chem, "Table 3 wipe_LR_LASSO R output.xlsx")
+```
+
+## air & wipe (both PC1 & PC2)
+```{r}
+linreg_results_air_chem <- list()
+
+for (dep in mh_domains) {
+  
+  cat("Running AIR chemical LR for:", dep, "\n")
+  
+  covars <- lasso_selected_vars_air[[dep]]
+  covars <- covars[covars != dep]
+  
+  predictors <- c(chem_air, covars)
+  
+  formula_str <- paste(
+    dep, "~", paste(predictors, collapse = " + ")
+  )
+  
+  model_lin <- lm(as.formula(formula_str), data = tox_air_covar)
+  linreg_results_air_chem[[dep]] <- model_lin
+}
+
+linreg_results_wipe_chem <- list()
+
+for (dep in mh_domains) {
+  
+  cat("Running WIPE chemical LR for:", dep, "\n")
+  
+  covars <- lasso_selected_vars_wipe[[dep]]
+  covars <- covars[covars != dep]
+  
+  predictors <- c(chem_wipe, covars)
+  
+  formula_str <- paste(
+    dep, "~", paste(predictors, collapse = " + ")
+  )
+  
+  model_lin <- lm(as.formula(formula_str), data = tox_wipe_covar)
+  linreg_results_wipe_chem[[dep]] <- model_lin
+}
+
+summary_air_chem_both <- do.call(
+  rbind,
+  lapply(names(linreg_results_air_chem), function(dep) {
+    extract_significant(linreg_results_air_chem[[dep]], dep)
+  })
+)
+
+View(summary_air_chem_both)
+
+summary_wipe_chem_both <- do.call(
+  rbind,
+  lapply(names(linreg_results_wipe_chem), function(dep) {
+    extract_significant(linreg_results_wipe_chem[[dep]], dep)
+  })
+)
+
+View(summary_wipe_chem_both)
+
+write_xlsx(summary_air_chem_both, "Table 3 air_LR_LASSO_both R output.xlsx")
+write_xlsx(summary_wipe_chem_both, "Table 3 wipe_LR_LASSO_both R output.xlsx")
+```
+
+## plots for beta & CI
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+# 1) Manually enter the table
+df <- tibble::tribble(
+  ~Model,  ~Predictor, ~Beta,      ~p_value,   ~CI_lower,   ~CI_upper,  ~Significance,
+  "ASI_s", "Ba_air",    3.068712,  0.025807,    0.428758,    5.708666,  "*",
+  "ASI_p", "Cr_wipe",  -5.829560,  0.004139,   -9.545210,   -2.113910, "**",
+  "CESD",  "V_air",   -11.324700,  0.022655,  -20.736600,   -1.912810,  "*",
+  "ASI_p", "Ba_air",   -1.465140,  0.049895,   -2.929460,   -0.000820,  "*",
+  "ASI_p", "Cd_air",    1.866010,  0.007598,    0.618017,    3.114003, "**",
+  "ASI_p", "Cu_air",    1.732974,  0.024772,    0.269868,    3.196081,  "*",
+  "ASI_p", "La_air",   -2.254890,  0.002950,   -3.542390,   -0.967390, "**",
+  "ASI_p", "Mn_air",    1.903972,  0.013951,    0.477494,    3.330450,  "*",
+  "ASI_p", "Mo_air",   -5.796300,  0.001535,   -8.792250,   -2.800360, "**",
+  "ASI_p", "Se_air",   -1.161840,  0.022386,   -2.121300,   -0.202380,  "*",
+  "ASI_p", "V_air",     5.557629,  0.001874,    2.598339,    8.516918, "**"
+)
+
+# Common plotting prep
+df_plot <- df %>%
+  dplyr::mutate(
+    element = Predictor %>%
+      str_replace_all("_air$", " (air)") %>%
+      str_replace_all("_wipe$", " (wipe)"),
+    Model = factor(Model)
+  )
+
+# Order y-axis by Beta from + to -
+elem_order <- df_plot %>%
+  arrange(desc(Beta)) %>%
+  distinct(element, .keep_all = TRUE) %>%
+  pull(element)
+
+df_plot <- df_plot %>%
+  dplyr::mutate(element = factor(element, levels = rev(elem_order)))
+
+pd <- position_dodge(width = 0.7)
+
+# 2) Forest plot (Beta with 95% CI), color = outcome/model
+ggplot(df_plot, aes(x = Beta, y = element, color = Model)) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_errorbarh(aes(xmin = CI_lower, xmax = CI_upper), height = 0.2, position = pd) +
+  geom_point(position = pd, size = 2) +
+  labs(x = "Beta (95% CI)", y = "Element", color = "Outcome") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+```
+
+
+# BKMR w/ LASSO
+
+## tox_air_covar using PCA
+```{r}
+# ---- PCA-selected air toxicants ----
+pca_selected_metals_air <- c(
+  names(top_pc1_air),   # from PC1
+  names(top_pc2_air)  # from PC2
+)
+
+# ---- BKMR using PCA-selected exposures ----
+mh_domains <- c("CESD", "FAST", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL")
+pip_results_air_pca <- tibble()
+
+for (dep in mh_domains) {
+  cat("Fitting BKMR for outcome:", dep, "...\n")
+  
+  # 1. outcome
+  Y <- tox_air_covar[[dep]]
+
+  # 2. exposures: PCA-selected metals
+  Z <- tox_air_covar %>%
+    dplyr::select(all_of(pca_selected_metals_air)) %>%
+    as.matrix()
+
+  # 3. covariates from LASSO
+  selected_covars <- lasso_selected_vars_air[[dep]]
+
+  if (length(selected_covars) <= 1) {
+    X <- NULL
+  } else {
+    X <- model.matrix(~ . - 1, data = tox_air_covar[, selected_covars, drop = FALSE])
+  }
+
+  # 4. BKMR
+  set.seed(202)
+  fit_km <- kmbayes(
+    y      = Y,
+    Z      = Z,
+    X      = X,
+    iter   = 5000,
+    varsel = TRUE,
+    verbose = FALSE
+  )
+
+  # 5. Extract PIPs for PCA-selected metals
+  pips <- ExtractPIPs(fit_km)
+  high_pip <- pips %>% filter(PIP > 0.5)
+
+  if (nrow(high_pip) > 0) {
+    pip_df <- tibble(
+      outcome  = dep,
+      exposure = high_pip$variable,
+      pip      = high_pip$PIP
+    )
+    pip_results_air_pca <- bind_rows(pip_results_air_pca, pip_df)
+  }
+
+  cat("  >> Finished", dep, "\n\n")
+}
+
+# View the combined PIP results
+View(pip_results_air_pca)
+write_xlsx(pip_results_air_pca, "pip_results_air_pca.xlsx")
+```
+
+
+
+
+## tox_wipe_covar using PCA
+```{r}
+# ---- PCA-selected wipe toxicants ----
+pca_selected_metals_wipe <- c(
+  names(top_pc1_wipe),  # from PC1
+  names(top_pc2_wipe)  # from PC2
+)
+
+# ---- BKMR using wipe PCA-selected exposures ----
+mh_domains <- c("CESD", "FAST", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL")
+pip_results_wipe_pca <- tibble()
+
+for (dep in mh_domains) {
+  cat("Fitting BKMR for outcome:", dep, "...\n")
+  
+  # 1. outcome variable
+  Y <- tox_wipe_covar[[dep]]
+
+  # 2. exposure matrix Z: wipe chemicals from PCA
+  Z <- tox_wipe_covar %>%
+    dplyr::select(all_of(pca_selected_metals_wipe)) %>%
+    as.matrix()
+
+  # 3. covariates selected by LASSO
+  selected_covars <- lasso_selected_vars_wipe[[dep]]
+
+  if (length(selected_covars) <= 1) {
+    X <- NULL
+  } else {
+    X <- model.matrix(~ . - 1, data = tox_wipe_covar[, selected_covars, drop = FALSE])
+  }
+
+  # 4. Run BKMR
+  set.seed(303)
+  fit_km <- kmbayes(
+    y      = Y,
+    Z      = Z,
+    X      = X,
+    iter   = 5000,
+    varsel = TRUE,
+    verbose = FALSE
+  )
+
+  # 5. Extract PIPs > 0.5
+  pips <- ExtractPIPs(fit_km)
+  high_pip <- pips %>% filter(PIP > 0.0)
+
+  if (nrow(high_pip) > 0) {
+    pip_df <- tibble(
+      outcome  = dep,
+      exposure = high_pip$variable,
+      pip      = high_pip$PIP
+    )
+    pip_results_wipe_pca <- bind_rows(pip_results_wipe_pca, pip_df)
+  }
+
+  cat("  >> Finished", dep, "\n\n")
+}
+
+# View all selected exposures
+View(pip_results_wipe_pca)
+write_xlsx(pip_results_wipe_pca, "pip_results_wipe_pca.xlsx")
+
+
+```
+## Bubble plots for PIP
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+
+pip_tbl <- tibble::tribble(
+  ~outcome, ~exposure,  ~PIP,
+  "ASI_p",  "Ba_air",   0.8824,
+  "ASI_p",  "Se_air",   0.7756,
+  "ASI_p",  "Cu_air",   0.7580,
+  "ASI_p",  "Mn_air",   0.7432,
+  "ASI_p",  "Mo_air",   0.7372,
+  "ASI_p",  "V_air",    0.7168,
+  "ASI_p",  "S_air",    0.6844,
+  "ASI_p",  "Co_air",   0.6796,
+  "ASI_p",  "La_air",   0.6736,
+  "ASI_p",  "Cd_air",   0.6724,
+  "PCL",    "Ba_air",   0.5740,
+  "ASI_s",  "Cd_air",   0.5352,
+  "PCL",    "Cd_air",   0.5156,
+  "ASI_p",  "Co_wipe",  0.9764,
+  "ASI_p",  "Sr_wipe",  0.9756,
+  "ASI_p",  "V_wipe",   0.9544,
+  "ASI_p",  "Cd_wipe",  0.9468,
+  "ASI_p",  "Mn_wipe",  0.8540,
+  "ASI_p",  "Cr_wipe",  0.8488,
+  "ASI_p",  "Ba_wipe",  0.8248,
+  "ASI_p",  "Mo_wipe",  0.8104,
+  "ASI_p",  "Cu_wipe",  0.7280,
+  "ASI_p",  "Ag_wipe",  0.5688
+)
+
+
+plot_df <- pip_tbl %>%
+  mutate(
+    medium = case_when(
+      str_ends(exposure, "_air")  ~ "air",
+      str_ends(exposure, "_wipe") ~ "wipe",
+      TRUE ~ NA_character_
+    ),
+    toxicant = str_remove(exposure, "_(air|wipe)$")
+  ) %>%
+  filter(!is.na(medium)) %>%
+  mutate(
+    medium  = factor(medium, levels = c("air", "wipe")),
+    outcome = factor(outcome, levels = c("ASI_p", "ASI_s", "PCL"))
+  )
+
+
+tox_group <- plot_df %>%
+  distinct(toxicant, medium) %>%
+  group_by(toxicant) %>%
+  summarise(
+    has_air  = any(medium == "air"),
+    has_wipe = any(medium == "wipe"),
+    .groups = "drop"
+  ) %>%
+  mutate(group = case_when(
+    has_air & has_wipe ~ "overlap",
+    has_wipe           ~ "wipe_only",
+    has_air            ~ "air_only",
+    TRUE               ~ "other"
+  ))
+
+tox_rank <- plot_df %>%
+  group_by(toxicant) %>%
+  summarise(maxP = max(PIP, na.rm = TRUE), .groups = "drop") %>%
+  left_join(tox_group, by = "toxicant") %>%
+  mutate(group = factor(group, levels = c("overlap", "wipe_only", "air_only"))) %>%
+  arrange(group, desc(maxP))
+
+tox_levels <- tox_rank$toxicant
+
+plot_df <- plot_df %>%
+  mutate(toxicant = factor(toxicant, levels = tox_levels))
+
+
+ggplot(plot_df, aes(x = toxicant, y = medium)) +
+  geom_point(aes(size = PIP, color = outcome), alpha = 0.9) +
+  scale_size_continuous(range = c(1, 15)) +
+  scale_color_manual(values = c("ASI_p" = "orange", "ASI_s" = "lightblue", "PCL" = "purple")) +
+  labs(x = "Toxicants", y = NULL, size = "PIP", color = NULL) +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 16),
+    panel.grid.major.y = element_blank()
+  )
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+pip_tbl <- tibble::tribble(
+  ~outcome, ~exposure,  ~PIP,
+  "ASI_p",  "Ba_air",   0.8824,
+  "ASI_p",  "Se_air",   0.7756,
+  "ASI_p",  "Cu_air",   0.7580,
+  "ASI_p",  "Mn_air",   0.7432,
+  "ASI_p",  "Mo_air",   0.7372,
+  "ASI_p",  "V_air",    0.7168,
+  "ASI_p",  "S_air",    0.6844,
+  "ASI_p",  "Co_air",   0.6796,
+  "ASI_p",  "La_air",   0.6736,
+  "ASI_p",  "Cd_air",   0.6724,
+  "PCL",    "Ba_air",   0.5740,
+  "ASI_s",  "Cd_air",   0.5352,
+  "PCL",    "Cd_air",   0.5156,
+  "ASI_p",  "Co_wipe",  0.9764,
+  "ASI_p",  "Sr_wipe",  0.9756,
+  "ASI_p",  "V_wipe",   0.9544,
+  "ASI_p",  "Cd_wipe",  0.9468,
+  "ASI_p",  "Mn_wipe",  0.8540,
+  "ASI_p",  "Cr_wipe",  0.8488,
+  "ASI_p",  "Ba_wipe",  0.8248,
+  "ASI_p",  "Mo_wipe",  0.8104,
+  "ASI_p",  "Cu_wipe",  0.7280,
+  "ASI_p",  "Ag_wipe",  0.5688
+)
+plot_df <- pip_tbl %>%
+  mutate(
+    medium = case_when(
+      str_ends(exposure, "_air")  ~ "air",
+      str_ends(exposure, "_wipe") ~ "wipe",
+      TRUE ~ NA_character_
+    ),
+    toxicant = str_remove(exposure, "_(air|wipe)$")
+  ) %>%
+  filter(!is.na(medium)) %>%
+  mutate(
+    medium  = factor(medium, levels = c("air", "wipe")),
+    outcome = factor(outcome, levels = c("ASI_p", "ASI_s", "PCL"))
+  )
+
+
+tox_group <- plot_df %>%
+  distinct(toxicant, medium) %>%
+  group_by(toxicant) %>%
+  summarise(
+    has_air  = any(medium == "air"),
+    has_wipe = any(medium == "wipe"),
+    .groups = "drop"
+  ) %>%
+  mutate(group = case_when(
+    has_air & has_wipe ~ "overlap",
+    has_wipe           ~ "wipe_only",
+    has_air            ~ "air_only",
+    TRUE               ~ "other"
+  ))
+
+tox_rank <- plot_df %>%
+  group_by(toxicant) %>%
+  summarise(maxP = max(PIP, na.rm = TRUE), .groups = "drop") %>%
+  left_join(tox_group, by = "toxicant") %>%
+  mutate(group = factor(group, levels = c("overlap", "wipe_only", "air_only"))) %>%
+  arrange(group, desc(maxP))
+
+tox_levels <- tox_rank$toxicant
+
+plot_df <- plot_df %>%
+  mutate(toxicant = factor(toxicant, levels = tox_levels))
+
+ggplot(plot_df, aes(x = toxicant, y = medium)) +
+  geom_point(aes(size = PIP, color = outcome), alpha = 0.9) +
+  scale_size_continuous(range = c(1, 15)) +
+  scale_color_manual(values = c("ASI_p" = "orange", "ASI_s" = "lightblue", "PCL" = "purple")) +
+  labs(x = "Toxicants", y = NULL, size = "PIP", color = NULL) +
+  theme_bw() +
+  theme(
+    legend.title = element_blank(),
+    legend.text = element_text(size = 16),
+    axis.text.x = element_text(angle = 0, hjust = 0.5, size = 13),
+    axis.text.y = element_text(size = 16),
+    panel.grid.major.y = element_blank()
+  ) +
+  guides(
+    color = guide_legend(override.aes = list(size = 6)),
+    size = guide_legend()
+  )
+```
+
+
+# Univariate Exposure-Response analysis
+## tox_wipe_covar
+PART 1: Compute and store BKMR univariate ER curves
+```{r}
+# --- PART 1: Compute and store BKMR univariate ER curves ---
+univar_ER_wipe <- list()
+
+for (dep in mh_domains) {
+  cat("Calculating BKMR univariate ER curves for:", dep, "...\n")
+  
+  # 1. outcome
+  Y <- tox_wipe_covar[[dep]]
+  
+  # 2. exposure matrix (PCA-selected wipe metals)
+  Z <- tox_wipe_covar %>%
+    dplyr::select(all_of(pca_selected_metals_wipe)) %>%
+    as.matrix()
+  
+  # 3. covariates
+  selected_covars <- lasso_selected_vars_wipe[[dep]]
+  if (length(selected_covars) <= 1) {
+    X <- NULL
+  } else {
+    X <- model.matrix(~ . - 1, data = tox_wipe_covar[, selected_covars, drop = FALSE])
+  }
+  
+  # 4. Fit BKMR
+  set.seed(303)
+  fit_km <- kmbayes(
+    y      = Y,
+    Z      = Z,
+    X      = X,
+    iter   = 5000,
+    varsel = TRUE,
+    verbose = FALSE
+  )
+  
+  # 5. Compute univariate exposure-response curves
+  er_curves <- PredictorResponseUnivar(
+    fit     = fit_km,
+    sel     = 1:ncol(Z),
+    method  = "approx"
+  )
+  
+  # Save result for this outcome
+  univar_ER_wipe[[dep]] <- er_curves
+  
+  cat("  >> Finished", dep, "\n\n")
+}
+```
+
+
+part 2: Plot ER curves for one mental health domain
+```{r}
+# ---- Plot ER curves for 7 mental health domains ----
+
+dep_to_plot <- "ASI"
+er_obj <- univar_ER_wipe[[dep_to_plot]]
+metal_names <- pca_selected_metals_wipe
+
+# Constant used in log10(x + const)
+shift_const <- 0.0001428715
+
+for (j in seq_along(metal_names)) {
+  
+  metal_name <- metal_names[j]
+  
+  df_plot <- er_obj %>% 
+    filter(variable == metal_name)
+  
+  if (nrow(df_plot) < 2) {
+    message("No ER curve for ", metal_name)
+    next
+  }
+  
+  df_plot$upper <- df_plot$est + 1.96 * df_plot$se
+  df_plot$lower <- df_plot$est - 1.96 * df_plot$se
+
+  # Compute tick marks in log-scale and convert to raw scale
+  xticks_log <- pretty(df_plot$z)
+  xticks_raw <- round(10^xticks_log - shift_const, 3)
+
+  plot(df_plot$z, df_plot$est, type = "l", lwd = 2,
+       xlab = paste0(metal_name, " (ppb)"),
+       ylab = paste("Estimated ER for", dep_to_plot),
+       main = paste("BKMR Univariate ER Curve:", metal_name),
+       xaxt = "n")
+  
+  axis(side = 1, at = xticks_log, labels = xticks_raw)
+  
+  lines(df_plot$z, df_plot$upper, lty = 2, col = "gray40")
+  lines(df_plot$z, df_plot$lower, lty = 2, col = "gray40")
+}
+
+
+```
+
+part 3: all in one plot
+```{r}
+# Dependent variables
+dep_vars <- c("CESD", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL", "FAST")
+
+# Constant used in log10(x + const)
+shift_const <- 0.0001428715
+
+for (dep in dep_vars) {
+  
+  cat("Plotting ER curves for:", dep, "\n")
+  
+  er_obj <- univar_ER_wipe[[dep]]
+  
+  df_all <- er_obj
+  
+  # Convert log10(x + c) → raw x value (ppb) for label display
+  df_all <- df_all %>%
+    mutate(
+      z_raw = round(10^z - shift_const, 3)
+    )
+
+  p <- ggplot(df_all, aes(x = z, y = est)) +
+    geom_line(size = 1) +
+    facet_wrap(~ variable, scales = "free_x") +
+    labs(
+      title = paste("BKMR Univariate Exposure–Response Curves for", dep),
+      x = "Exposure (ppb)",  # <-- changed to ppb
+      y = paste("Estimated ER for", dep)
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      strip.background = element_rect(fill = "white"),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_x_continuous(
+      breaks = pretty(df_all$z),
+      labels = function(z) round(10^z - shift_const, 3)
+    )
+  
+  print(p)
+  
+ # Save each plot
+  ggsave(
+    filename = paste0("ER_curve_wipe_", dep, ".png"),
+    plot = p,
+    width = 10,
+    height = 7,
+    dpi = 300
+  )
+  
+}
+
+
+```
+
+## tox_air_covar
+PART 1: Compute and store BKMR univariate ER curves
+```{r}
+# --- PART 1: Compute and store BKMR univariate ER curves ---
+univar_ER_air <- list()
+
+for (dep in mh_domains) {
+  cat("Calculating BKMR univariate ER curves for:", dep, "...\n")
+  
+  # 1. outcome
+  Y <- tox_air_covar[[dep]]
+  
+  # 2. exposure matrix (PCA-selected air metals)
+  Z <- tox_air_covar %>%
+    dplyr::select(all_of(pca_selected_metals_air)) %>%
+    as.matrix()
+  
+  # 3. covariates
+  selected_covars <- lasso_selected_vars_air[[dep]]
+  if (length(selected_covars) <= 1) {
+    X <- NULL
+  } else {
+    X <- model.matrix(~ . - 1, data = tox_air_covar[, selected_covars, drop = FALSE])
+  }
+  
+  # 4. Fit BKMR
+  set.seed(303)
+  fit_km <- kmbayes(
+    y      = Y,
+    Z      = Z,
+    X      = X,
+    iter   = 5000,
+    varsel = TRUE,
+    verbose = FALSE
+  )
+  
+  # 5. Compute univariate exposure-response curves
+  er_curves <- PredictorResponseUnivar(
+    fit     = fit_km,
+    sel     = 1:ncol(Z),
+    method  = "approx"
+  )
+  
+  # Save result for this outcome
+  univar_ER_air[[dep]] <- er_curves
+  
+  cat("  >> Finished", dep, "\n\n")
+}
+```
+
+part 2: Plot ER curves for one mental health domain
+```{r}
+# ---- Plot ER curves for 7 mental health domains ----
+
+dep_to_plot <- "ASI_p"
+er_obj <- univar_ER_air[[dep_to_plot]]
+metal_names <- pca_selected_metals_air
+
+# Constant used in log10(x + const)
+shift_const <- 0.0001428715
+
+for (j in seq_along(metal_names)) {
+  
+  metal_name <- metal_names[j]
+  
+  df_plot <- er_obj %>% 
+    filter(variable == metal_name)
+  
+  if (nrow(df_plot) < 2) {
+    message("No ER curve for ", metal_name)
+    next
+  }
+  
+  df_plot$upper <- df_plot$est + 1.96 * df_plot$se
+  df_plot$lower <- df_plot$est - 1.96 * df_plot$se
+
+  # Compute tick marks in log-scale and convert to raw scale
+  xticks_log <- pretty(df_plot$z)
+  xticks_raw <- round(10^xticks_log - shift_const, 3)
+
+  plot(df_plot$z, df_plot$est, type = "l", lwd = 2,
+       xlab = bquote(.(metal_name) ~ "(" * mu * "g/" * m^3 * ")"),
+       ylab = paste("Estimated ER for", dep_to_plot),
+       main = paste("BKMR Univariate ER Curve:", metal_name),
+       xaxt = "n")
+  
+  axis(side = 1, at = xticks_log, labels = xticks_raw)
+  
+  lines(df_plot$z, df_plot$upper, lty = 2, col = "gray40")
+  lines(df_plot$z, df_plot$lower, lty = 2, col = "gray40")
+}
+
+
+```
+
+part 3: all in one plot
+```{r}
+# Dependent variables
+dep_vars <- c("CESD", "ASI", "ASI_p", "ASI_c", "ASI_s", "PCL", "FAST")
+
+# Constant used in log10(x + const)
+shift_const <- 0.0001428715
+
+for (dep in dep_vars) {
+  
+  cat("Plotting ER curves for:", dep, "\n")
+  
+  er_obj <- univar_ER_air[[dep]]
+  
+  df_all <- er_obj
+  
+  # Convert log10(x + c) → raw x value (ppb) for label display
+  df_all <- df_all %>%
+    mutate(
+      z_raw = round(10^z - shift_const, 3)
+    )
+
+  p <- ggplot(df_all, aes(x = z, y = est)) +
+    geom_line(size = 1) +
+    facet_wrap(~ variable, scales = "free_x") +
+    labs(
+      title = paste("BKMR Univariate Exposure–Response Curves for", dep),
+      x = expression("Exposure (" * mu * "g/" * m^3 * ")"),
+      y = paste("Estimated ER for", dep)
+    ) +
+    theme_bw(base_size = 13) +
+    theme(
+      strip.background = element_rect(fill = "white"),
+      plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_x_continuous(
+      breaks = pretty(df_all$z),
+      labels = function(z) round(10^z - shift_const, 3)
+    )
+  
+  print(p)
+  
+  # Save each plot
+  ggsave(
+    filename = paste0("ER_curve_air_", dep, ".png"),
+    plot = p,
+    width = 10,
+    height = 7,
+    dpi = 300
+  )
+  
+}
+
+
+```
